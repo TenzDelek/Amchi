@@ -12,6 +12,7 @@ import { runReview } from "./run.js";
 import { similar } from "./review/reviewer.js";
 import { isAbsolute } from "node:path";
 import { log, setVerbose } from "./util/log.js";
+import { relaunchWithBaselineWasm } from "./util/relaunch.js";
 
 function input(name: string): string {
   return core.getInput(name) || "";
@@ -35,6 +36,7 @@ function configOverrides(): Partial<Config> {
 }
 
 async function main() {
+  relaunchWithBaselineWasm();
   setVerbose(core.isDebug());
   // Map action inputs to the env vars the providers read.
   if (input("openai_api_key")) process.env.OPENAI_API_KEY = input("openai_api_key");

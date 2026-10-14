@@ -9,6 +9,7 @@ import { createEmbedder, createLLM, keysFromEnv } from "./llm/index.js";
 import { renderLocalReport } from "./review/render.js";
 import { runReview } from "./run.js";
 import { log, setVerbose } from "./util/log.js";
+import { relaunchWithBaselineWasm } from "./util/relaunch.js";
 
 const HELP = `amchi — AI code review with a code graph
 
@@ -66,6 +67,7 @@ function defaultBase(git: Git): string {
 }
 
 async function main() {
+  relaunchWithBaselineWasm();
   const { pos, flags } = parseArgs(process.argv.slice(2));
   const cmd = pos[0];
   if (!cmd || flags.help) {

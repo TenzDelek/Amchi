@@ -14153,6 +14153,22 @@ async function runReview(input) {
   return { out: out2, allFiles, reviewFiles, mergeBase, incrementalFrom, workspace };
 }
 
+// src/util/relaunch.ts
+import { spawnSync } from "node:child_process";
+var FLAG = "--liftoff-only";
+var MARK = "AMCHI_BASELINE_WASM";
+function relaunchWithBaselineWasm() {
+  if (process.env[MARK] || process.execArgv.includes(FLAG)) return;
+  const probe = spawnSync(process.execPath, [FLAG, "-e", "0"], { stdio: "ignore" });
+  if (probe.status !== 0) return;
+  const child = spawnSync(process.execPath, [FLAG, ...process.execArgv, ...process.argv.slice(1)], {
+    stdio: "inherit",
+    env: { ...process.env, [MARK]: "1" }
+  });
+  if (child.error) return;
+  process.exit(child.status ?? 1);
+}
+
 // src/cli.ts
 var HELP = `amchi \u2014 AI code review with a code graph
 
@@ -14206,6 +14222,7 @@ function defaultBase(git) {
   return "HEAD~1";
 }
 async function main() {
+  relaunchWithBaselineWasm();
   const { pos, flags: flags2 } = parseArgs(process.argv.slice(2));
   const cmd = pos[0];
   if (!cmd || flags2.help) {

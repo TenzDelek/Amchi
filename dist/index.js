@@ -38194,6 +38194,24 @@ async function runReview(input2) {
 
 // src/index.ts
 import { isAbsolute as isAbsolute3 } from "node:path";
+
+// src/util/relaunch.ts
+import { spawnSync } from "node:child_process";
+var FLAG = "--liftoff-only";
+var MARK = "AMCHI_BASELINE_WASM";
+function relaunchWithBaselineWasm() {
+  if (process.env[MARK] || process.execArgv.includes(FLAG)) return;
+  const probe = spawnSync(process.execPath, [FLAG, "-e", "0"], { stdio: "ignore" });
+  if (probe.status !== 0) return;
+  const child = spawnSync(process.execPath, [FLAG, ...process.execArgv, ...process.argv.slice(1)], {
+    stdio: "inherit",
+    env: { ...process.env, [MARK]: "1" }
+  });
+  if (child.error) return;
+  process.exit(child.status ?? 1);
+}
+
+// src/index.ts
 function input(name) {
   return core.getInput(name) || "";
 }
@@ -38214,6 +38232,7 @@ function configOverrides() {
   return o;
 }
 async function main() {
+  relaunchWithBaselineWasm();
   setVerbose(core.isDebug());
   if (input("openai_api_key")) process.env.OPENAI_API_KEY = input("openai_api_key");
   if (input("anthropic_api_key")) process.env.ANTHROPIC_API_KEY = input("anthropic_api_key");
