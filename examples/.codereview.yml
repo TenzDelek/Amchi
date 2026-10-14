@@ -1,0 +1,59 @@
+# Copy to .codereview.yml in your repository root. Every key is optional.
+
+# provider: auto            # auto | anthropic | openai | gemini
+# model: claude-sonnet-5-5  # any model id your key can use
+# base_url: https://openrouter.ai/api/v1   # OpenAI-compatible endpoint
+# embeddings: auto          # auto | openai | gemini | off
+
+# Free-form guidance added to every review prompt.
+instructions: |
+  We use TypeScript strict mode and Zod for validation at API boundaries.
+  Prefer early returns. Database access goes through src/db/repositories only.
+
+# Team rules. Applied to files matching `paths` (all files if omitted).
+rules:
+  - name: No raw SQL in handlers
+    rule: Route handlers must not build SQL strings; use the repository layer.
+    paths: ["src/api/**"]
+    severity: high
+  - rule: Every new API endpoint must check the caller's permissions.
+    paths: ["src/api/**"]
+  - rule: Don't log access tokens, passwords or full request bodies.
+
+review:
+  skip_drafts: true
+  skip_authors: ["dependabot[bot]", "renovate[bot]"]
+  skip_labels: ["no-ai-review"]
+  skip_title_patterns: ["[skip review]", "[wip]"]
+  ignore: ["**/*.test.ts", "docs/**", "migrations/**"]
+  max_files: 80
+  max_comments: 15
+  min_severity: low           # info | low | medium | high | critical
+  min_confidence: 0.6
+  incremental: true           # on new pushes, only review commits since the last review
+  suggestions: true           # one-click ```suggestion blocks
+  verify: false               # second pass to drop false positives (~2x cost)
+  request_changes_on: none    # e.g. critical -> submit "Request changes"
+  fail_on: none               # e.g. high -> fail the check
+
+summary:
+  enabled: true
+  diagram: true               # Mermaid sequence diagram of the change
+  file_table: true
+  confidence_score: true
+
+chat:
+  enabled: true
+  trigger: "@codegraph"
+  allowed_associations: [OWNER, MEMBER, COLLABORATOR]
+
+index:
+  max_file_kb: 256
+  max_files: 25000
+  ignore: ["fixtures/**"]
+
+limits:
+  max_input_tokens_per_call: 60000
+  max_output_tokens: 8000
+  max_total_input_tokens: 1500000   # hard stop per run
+  concurrency: 4

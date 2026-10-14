@@ -1,0 +1,75 @@
+name: "CodeGraph Review"
+description: "Self-hosted AI pull request reviewer with a repository code graph. Works with OpenAI, Claude or Gemini keys."
+author: "codegraph-review"
+branding:
+  icon: "git-pull-request"
+  color: "purple"
+
+inputs:
+  github_token:
+    description: "Token used to read the PR and post comments."
+    default: ${{ github.token }}
+  anthropic_api_key:
+    description: "Anthropic API key (Claude)."
+    required: false
+  openai_api_key:
+    description: "OpenAI API key (or key for an OpenAI-compatible endpoint set in base_url)."
+    required: false
+  gemini_api_key:
+    description: "Google Gemini API key."
+    required: false
+  provider:
+    description: "auto | anthropic | openai | gemini. auto picks the first key provided (anthropic, openai, gemini)."
+    required: false
+  model:
+    description: "Model id. Defaults: claude-sonnet-5-5, gpt-5.5, gemini-3.8-flash."
+    required: false
+  base_url:
+    description: "OpenAI-compatible base URL (OpenRouter, Azure OpenAI, DeepSeek, Groq, self-hosted vLLM/Ollama…)."
+    required: false
+  embeddings:
+    description: "auto | openai | gemini | off. Semantic search over the code graph; off = keyword + graph only."
+    required: false
+  config_path:
+    description: "Path to the config file (default: .codereview.yml in the repo root)."
+    required: false
+  mode:
+    description: "auto | review | index. auto reviews on pull_request, answers on comments, indexes on push."
+    required: false
+    default: "auto"
+  max_comments:
+    description: "Maximum inline comments per run (overrides config)."
+    required: false
+  min_severity:
+    description: "info | low | medium | high | critical. Lowest severity to post (overrides config)."
+    required: false
+  verify:
+    description: "true to run a second pass that removes false positives (roughly doubles cost)."
+    required: false
+  fail_on:
+    description: "none | low | medium | high | critical. Fail the check when a finding at this severity or above is posted."
+    required: false
+  trigger:
+    description: "Mention that triggers chat and re-reviews in comments (default @codegraph)."
+    required: false
+  max_total_input_tokens:
+    description: "Hard cap on input tokens per run — protects your bill on huge PRs."
+    required: false
+
+outputs:
+  findings:
+    description: "Number of issues reported."
+  confidence:
+    description: "Merge confidence score (1-5)."
+  input_tokens:
+    description: "LLM input tokens used."
+  output_tokens:
+    description: "LLM output tokens used."
+  skipped:
+    description: "Reason the review was skipped, if it was."
+  indexed_files:
+    description: "Files in the code graph (index mode)."
+
+runs:
+  using: "node24"
+  main: "dist/index.js"

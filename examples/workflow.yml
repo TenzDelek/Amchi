@@ -1,0 +1,53 @@
+# Copy to .github/workflows/code-review.yml in the repository you want reviewed.
+name: AI code review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  push:
+    branches: [main] # keeps the code-graph cache warm so PR runs only re-index changed files
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  # Reviews of the same PR replace each other; every comment (question) gets its own run.
+  group: codegraph-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  review:
+    # Comment events only run when the bot is mentioned (and never for bot comments).
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      (contains(github.event.comment.body, '@codegraph') && github.event.comment.user.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # needed for merge-base and incremental reviews
+          ref: ${{ github.event.pull_request.head.sha || (github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number)) || github.sha }}
+
+      # Persist the code graph + embeddings between runs.
+      - uses: actions/cache@v5
+        with:
+          path: .codegraph
+          key: codegraph-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: codegraph-${{ runner.os }}-
+
+      - uses: YOUR_ORG/codegraph-review@v1
+        with:
+          # Provide at least one key. With several, `provider` picks (default: anthropic > openai > gemini).
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}   # also used for embeddings if present
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          # provider: openai
+          # model: gpt-5.4-mini

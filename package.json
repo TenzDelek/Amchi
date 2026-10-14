@@ -1,0 +1,33 @@
+{
+  "name": "codegraph-review",
+  "version": "0.1.0",
+  "description": "Self-hosted, Greptile-style AI pull request reviewer with a code graph. Runs as a GitHub Action with OpenAI, Claude or Gemini.",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^1.11.1",
+    "@actions/github": "^6.0.1",
+    "minimatch": "^10.2.6",
+    "tree-sitter-wasms": "^0.1.12",
+    "web-tree-sitter": "^0.20.8",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.4"
+  },
+  "type": "module",
+  "private": true,
+  "bin": {
+    "codegraph-review": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
