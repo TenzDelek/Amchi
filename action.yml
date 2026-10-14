@@ -1,6 +1,6 @@
-name: "CodeGraph Review"
+name: "Takche"
 description: "Self-hosted AI pull request reviewer with a repository code graph. Works with OpenAI, Claude or Gemini keys."
-author: "codegraph-review"
+author: "TenzDelek"
 branding:
   icon: "git-pull-request"
   color: "purple"

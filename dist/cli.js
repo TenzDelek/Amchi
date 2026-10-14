@@ -13962,15 +13962,15 @@ async function runReview(input) {
 }
 
 // src/cli.ts
-var HELP = `codegraph-review \u2014 AI code review with a code graph
+var HELP = `takche \u2014 AI code review with a code graph
 
 Usage:
-  codegraph-review review [--base <ref>] [--head <ref>] [options]
+  takche review [--base <ref>] [--head <ref>] [options]
       Review the changes between base and head (default: merge-base with main..HEAD)
       and print a markdown report.
-  codegraph-review ask "<question>" [options]
+  takche ask "<question>" [options]
       Ask a question about the repository.
-  codegraph-review index [options]
+  takche index [options]
       Build or update the code graph cache (.codegraph/).
 
 Options:
@@ -14036,7 +14036,7 @@ async function main() {
   }
   if (cmd === "ask") {
     const question = pos.slice(1).join(" ").trim();
-    if (!question) throw new Error('Usage: codegraph-review ask "<question>"');
+    if (!question) throw new Error('Usage: takche ask "<question>"');
     const llm = createLLM(cfg, keys);
     const ws = await openWorkspace(root, cfg, createEmbedder(cfg, keys));
     const answer = await answerQuestion({ question, graph: ws.graph, searcher: ws.searcher, llm });

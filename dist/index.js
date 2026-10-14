@@ -38028,7 +38028,7 @@ async function main() {
   const event = import_github2.context.eventName;
   const mode = input("mode") || "auto";
   const payload = import_github2.context.payload;
-  log.info(`codegraph-review \xB7 event=${event} mode=${mode}`);
+  log.info(`takche \xB7 event=${event} mode=${mode}`);
   if (mode === "index" || mode === "auto" && ["push", "workflow_dispatch", "schedule"].includes(event)) {
     const embedder = createEmbedder(cfg, keys);
     const ws = await openWorkspace(root, cfg, embedder, { commit: import_github2.context.sha });

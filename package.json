@@ -1,5 +1,5 @@
 {
-  "name": "codegraph-review",
+  "name": "takche",
   "version": "0.1.0",
   "description": "Self-hosted, Greptile-style AI pull request reviewer with a code graph. Runs as a GitHub Action with OpenAI, Claude or Gemini.",
   "scripts": {
@@ -25,7 +25,7 @@
   "type": "module",
   "private": true,
   "bin": {
-    "codegraph-review": "dist/cli.js"
+    "takche": "dist/cli.js"
   },
   "engines": {
     "node": ">=20"

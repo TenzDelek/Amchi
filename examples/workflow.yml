@@ -43,7 +43,7 @@ jobs:
           key: codegraph-${{ runner.os }}-${{ github.run_id }}
           restore-keys: codegraph-${{ runner.os }}-
 
-      - uses: YOUR_ORG/codegraph-review@v1
+      - uses: TenzDelek/Takche@v1
         with:
           # Provide at least one key. With several, `provider` picks (default: anthropic > openai > gemini).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

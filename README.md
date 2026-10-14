@@ -1,4 +1,4 @@
-# CodeGraph Review
+# Takche
 
 A self-hosted, Greptile-style AI code reviewer that runs as a **GitHub Action** with **your own** OpenAI, Claude or Gemini key. You pay only for the tokens you use. There's no per-seat fee and no per-review overage.
 
@@ -43,11 +43,11 @@ Supported languages (full graph): TypeScript, TSX, JavaScript, Python, Go, Rust,
 
 ## Setup
 
-**1. Publish the action.** Push this folder to a repo in your org, for example `your-org/codegraph-review`, and tag it:
+**1. Publish the action.** Push this folder to a repo in your org, for example `your-org/takche`, and tag it:
 
 ```bash
-git init && git add -A && git commit -m "CodeGraph Review v1"
-git remote add origin git@github.com:your-org/codegraph-review.git
+git init && git add -A && git commit -m "Takche v1"
+git remote add origin git@github.com:your-org/takche.git
 git push -u origin main
 git tag v1 && git push origin v1
 ```

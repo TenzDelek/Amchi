@@ -52,7 +52,7 @@ async function main() {
   const mode = input("mode") || "auto";
   const payload = context.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-  log.info(`codegraph-review · event=${event} mode=${mode}`);
+  log.info(`takche · event=${event} mode=${mode}`);
 
   if (mode === "index" || (mode === "auto" && ["push", "workflow_dispatch", "schedule"].includes(event))) {
     const embedder = createEmbedder(cfg, keys);
