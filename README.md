@@ -2,7 +2,7 @@
 
 *Amchi* (ཨམ་ཆི) is Tibetan for "doctor": it checks your pull requests before they ship.
 
-A self-hosted, Greptile-style AI code reviewer that runs as a **GitHub Action** with **your own** OpenAI, Claude or Gemini key. You pay only for the tokens you use. There's no per-seat fee and no per-review overage.
+A self-hosted AI code reviewer that runs as a **GitHub Action** with **your own** OpenAI, Claude or Gemini key. You pay only for the tokens you use. There's no per-seat fee and no per-review overage.
 
 It builds a **code graph** of the whole repository (functions, classes, imports, call edges) and uses it to give the model the context a senior reviewer would look at. That includes the full functions being changed, the real signatures of what they call, every caller that might break, related tests, and similar code elsewhere in the repo.
 

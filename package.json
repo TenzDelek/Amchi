@@ -1,7 +1,7 @@
 {
   "name": "amchi",
   "version": "0.1.0",
-  "description": "Self-hosted, Greptile-style AI pull request reviewer with a code graph. Runs as a GitHub Action with OpenAI, Claude or Gemini.",
+  "description": "Self-hosted AI pull request reviewer with a code graph. Runs as a GitHub Action with OpenAI, Claude or Gemini.",
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",

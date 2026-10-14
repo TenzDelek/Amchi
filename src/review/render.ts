@@ -38,7 +38,7 @@ export function setBadgeStyle(style: BadgeStyle) {
   defaultBadges = style;
 }
 
-/** Priority label per severity, Greptile-style: P0 is the most urgent. */
+/** Priority label per severity: P0 is the most urgent. */
 export const PRIORITY: Record<Severity, string> = {
   critical: "P0",
   high: "P1",

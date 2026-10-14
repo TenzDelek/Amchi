@@ -130,7 +130,7 @@ describe("rendering", () => {
     expect(md.endsWith("\n````")).toBe(true);
   });
 
-  it("renders a Greptile-style summary with score, risk, findings list and agent prompt", () => {
+  it("renders a summary with score, risk, findings list and agent prompt", () => {
     const g: Finding = { ...f, path: "b.ts", line: 10, endLine: 12, severity: "critical", title: "SQL injection", body: "Unescaped input.", suggestion: undefined, fingerprint: "def456" };
     const md = renderSummary(
       {
