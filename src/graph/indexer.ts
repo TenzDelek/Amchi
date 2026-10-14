@@ -39,7 +39,7 @@ export interface IndexStats {
 }
 
 // ---------------------------------------------------------------------------
-// Persistence (.codegraph/index.json.gz)
+// Persistence (.takche/index.json.gz)
 // ---------------------------------------------------------------------------
 
 export function indexFile(dir: string) {
@@ -86,7 +86,7 @@ export function listRepoFiles(root: string): string[] {
     const out: string[] = [];
     const walk = (rel: string) => {
       for (const name of readdirSync(join(root, rel))) {
-        if (name === ".git" || name === "node_modules" || name === ".codegraph") continue;
+        if (name === ".git" || name === "node_modules" || name === ".takche") continue;
         const r = rel ? `${rel}/${name}` : name;
         const st = lstatSync(join(root, r));
         if (st.isDirectory()) walk(r);

@@ -19,7 +19,7 @@ Usage:
   takche ask "<question>" [options]
       Ask a question about the repository.
   takche index [options]
-      Build or update the code graph cache (.codegraph/).
+      Build or update the code graph cache (.takche/).
 
 Options:
   --repo <dir>        Repository root (default: current directory)

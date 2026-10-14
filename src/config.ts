@@ -117,11 +117,11 @@ export const DEFAULT_CONFIG: Config = {
   },
   chat: {
     enabled: true,
-    trigger: "@codegraph",
+    trigger: "@takche",
     allowed_associations: ["OWNER", "MEMBER", "COLLABORATOR"],
   },
   index: {
-    dir: ".codegraph",
+    dir: ".takche",
     max_file_kb: 256,
     max_files: 25000,
     ignore: [],
@@ -149,7 +149,7 @@ function deepMerge<T>(base: T, over: unknown): T {
   return out as T;
 }
 
-export const CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".codegraph.yml", ".codegraph.yaml"];
+export const CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".takche.yml", ".takche.yaml"];
 
 export interface LoadConfigOptions {
   /**

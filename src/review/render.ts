@@ -3,10 +3,10 @@ import type { FileDiff } from "../git/diff.js";
 import type { Usage } from "../llm/types.js";
 import type { Finding, ReviewOutput } from "./reviewer.js";
 
-export const SUMMARY_MARKER = "<!-- codegraph:summary -->";
-export const FP_MARKER = (fp: string) => `<!-- codegraph:fp=${fp} -->`;
-export const FP_RE = /<!-- codegraph:fp=([a-f0-9]+) -->/;
-const STATE_RE = /<!-- codegraph:state (.*?) -->/gs;
+export const SUMMARY_MARKER = "<!-- takche:summary -->";
+export const FP_MARKER = (fp: string) => `<!-- takche:fp=${fp} -->`;
+export const FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
+const STATE_RE = /<!-- takche:state (.*?) -->/gs;
 
 export interface ReviewState {
   lastSha?: string;
@@ -158,7 +158,7 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   // If anything wasn't reviewed, keep the old lastSha so the next run covers it again.
   const complete = !out.failed.length && !out.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- codegraph:state ${encodeState({ lastSha, files: fileSummaries, issues })} -->`);
+  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues })} -->`);
   return L.join("\n");
 }
 

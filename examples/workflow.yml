@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   # Reviews of the same PR replace each other; every comment (question) gets its own run.
-  group: codegraph-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
+  group: takche-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
-      (contains(github.event.comment.body, '@codegraph') && github.event.comment.user.type != 'Bot')
+      (contains(github.event.comment.body, '@takche') && github.event.comment.user.type != 'Bot')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -39,9 +39,9 @@ jobs:
       # Persist the code graph + embeddings between runs.
       - uses: actions/cache@v5
         with:
-          path: .codegraph
-          key: codegraph-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: codegraph-${{ runner.os }}-
+          path: .takche
+          key: takche-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: takche-${{ runner.os }}-
 
       - uses: TenzDelek/Takche@v1
         with:

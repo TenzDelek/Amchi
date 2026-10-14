@@ -117,7 +117,7 @@ describe("rendering", () => {
   it("round-trips state through the summary comment, even with '--' in text", () => {
     const md = renderSummary(
       { inline: [f], outside: [], dropped: 0, fileSummaries: { "a.ts": "uses --flag --> safely" }, summary: null, reviewed: [], skipped: [], failed: [], budgetHit: false },
-      { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@codegraph", allFiles: [] },
+      { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@takche", allFiles: [] },
       {},
     );
     const comments = md.match(/<!--[\s\S]*?-->/g)!;

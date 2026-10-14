@@ -10869,7 +10869,7 @@ minimatch.unescape = unescape;
 
 // src/util/log.ts
 var inActions = !!process.env.GITHUB_ACTIONS;
-var verbose = !!process.env.CODEGRAPH_DEBUG;
+var verbose = !!process.env.TAKCHE_DEBUG;
 function setVerbose(v) {
   verbose = v;
 }
@@ -10991,11 +10991,11 @@ var DEFAULT_CONFIG = {
   },
   chat: {
     enabled: true,
-    trigger: "@codegraph",
+    trigger: "@takche",
     allowed_associations: ["OWNER", "MEMBER", "COLLABORATOR"]
   },
   index: {
-    dir: ".codegraph",
+    dir: ".takche",
     max_file_kb: 256,
     max_files: 25e3,
     ignore: []
@@ -11020,7 +11020,7 @@ function deepMerge(base, over) {
   }
   return out2;
 }
-var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".codegraph.yml", ".codegraph.yaml"];
+var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".takche.yml", ".takche.yaml"];
 function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   let fileCfg = {};
   const candidates = explicitPath ? [explicitPath] : CONFIG_FILENAMES;
@@ -12138,7 +12138,7 @@ function listRepoFiles(root) {
     const out2 = [];
     const walk = (rel) => {
       for (const name of readdirSync(join3(root, rel))) {
-        if (name === ".git" || name === "node_modules" || name === ".codegraph") continue;
+        if (name === ".git" || name === "node_modules" || name === ".takche") continue;
         const r = rel ? `${rel}/${name}` : name;
         const st = lstatSync(join3(root, r));
         if (st.isDirectory()) walk(r);
@@ -13064,7 +13064,7 @@ var TrackedLLM = class {
     }
     const t0 = Date.now();
     const res = await this.inner.chat(req);
-    const dump = process.env.CODEGRAPH_DUMP_PROMPTS;
+    const dump = process.env.TAKCHE_DUMP_PROMPTS;
     if (dump) {
       mkdirSync3(dump, { recursive: true });
       const name = `${String(this.usage.calls + 1).padStart(3, "0")}-${(req.label ?? "call").replace(/[^\w.-]+/g, "_").slice(0, 80)}.md`;
@@ -13140,9 +13140,9 @@ function createEmbedder(cfg, keys) {
 }
 
 // src/review/render.ts
-var SUMMARY_MARKER = "<!-- codegraph:summary -->";
-var FP_MARKER = (fp) => `<!-- codegraph:fp=${fp} -->`;
-var FP_RE = /<!-- codegraph:fp=([a-f0-9]+) -->/;
+var SUMMARY_MARKER = "<!-- takche:summary -->";
+var FP_MARKER = (fp) => `<!-- takche:fp=${fp} -->`;
+var FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
 var SEV_ICON = {
   critical: "\u{1F534}",
   high: "\u{1F7E0}",
@@ -13239,7 +13239,7 @@ function renderSummary(out2, meta, state) {
   );
   const complete = !out2.failed.length && !out2.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- codegraph:state ${encodeState({ lastSha, files: fileSummaries, issues })} -->`);
+  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues })} -->`);
   return L.join("\n");
 }
 function fmtK(n) {
@@ -13971,7 +13971,7 @@ Usage:
   takche ask "<question>" [options]
       Ask a question about the repository.
   takche index [options]
-      Build or update the code graph cache (.codegraph/).
+      Build or update the code graph cache (.takche/).
 
 Options:
   --repo <dir>        Repository root (default: current directory)

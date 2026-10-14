@@ -50,7 +50,7 @@ inputs:
     description: "none | low | medium | high | critical. Fail the check when a finding at this severity or above is posted."
     required: false
   trigger:
-    description: "Mention that triggers chat and re-reviews in comments (default @codegraph)."
+    description: "Mention that triggers chat and re-reviews in comments (default @takche)."
     required: false
   max_total_input_tokens:
     description: "Hard cap on input tokens per run — protects your bill on huge PRs."

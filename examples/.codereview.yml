@@ -44,7 +44,7 @@ summary:
 
 chat:
   enabled: true
-  trigger: "@codegraph"
+  trigger: "@takche"
   allowed_associations: [OWNER, MEMBER, COLLABORATOR]
 
 index:

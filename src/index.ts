@@ -68,7 +68,7 @@ async function main() {
     const body: string = comment?.body ?? "";
     if (payload.action !== "created" || comment?.user?.type === "Bot") return;
     // Never answer ourselves (matters when github_token is a PAT posting as a user).
-    if (body.includes("<!-- codegraph:") || (await gh.isOwnComment(comment?.user))) return;
+    if (body.includes("<!-- takche:") || (await gh.isOwnComment(comment?.user))) return;
     const number: number | undefined = payload.issue?.number ?? payload.pull_request?.number;
     const isPr = event === "pull_request_review_comment" || !!payload.issue?.pull_request;
     // The workspace holds the PR head, which the PR author controls: read config from the base commit.
