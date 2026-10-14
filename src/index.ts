@@ -7,7 +7,7 @@ import { parseUnifiedDiff } from "./git/diff.js";
 import { GitHubClient, type PullInfo } from "./github/client.js";
 import { openWorkspace } from "./graph/workspace.js";
 import { createEmbedder, createLLM, keysFromEnv, type TrackedLLM } from "./llm/index.js";
-import { renderSummary, parseState, type ReviewState } from "./review/render.js";
+import { renderSummary, parseState, setBadgeStyle, type ReviewState } from "./review/render.js";
 import { runReview } from "./run.js";
 import { similar } from "./review/reviewer.js";
 import { isAbsolute } from "node:path";
@@ -223,6 +223,7 @@ async function reviewPr(
     core.setOutput("skipped", skip);
     return;
   }
+  setBadgeStyle(cfg.review.badges);
   checkoutHead(root, pr.headSha);
   const git = new Git(root);
   if (!git.ensureCommit(pr.baseSha)) throw new Error(`Could not fetch base commit ${pr.baseSha}. Use actions/checkout with fetch-depth: 0.`);
@@ -280,17 +281,25 @@ async function reviewPr(
   out.outside.push(...failedToPlace);
   out.inline = out.inline.filter((f) => !failedToPlace.includes(f));
 
+  // Link each finding in the summary to its inline comment (from this or an earlier run).
+  const commentUrls: Record<string, string> = {};
+  const all = fresh.length ? await gh.existingComments(pr.number) : posted;
+  for (const p of all) if (p.fingerprint) commentUrls[p.fingerprint] = p.url;
+
   const summary = renderSummary(
     out,
     {
       baseSha: res.mergeBase,
       headSha: pr.headSha,
+      headSubject: git.run(["log", "-1", "--format=%s", pr.headSha], { allowFail: true }).trim() || undefined,
       incrementalFrom: res.incrementalFrom,
       provider: llm.provider,
       model: llm.model,
       usage: llm.usage,
       trigger: cfg.chat.trigger,
       allFiles: res.allFiles,
+      commentUrls,
+      botName: cfg.chat.trigger.replace(/^@/, "") || "Takche",
     },
     state,
   );

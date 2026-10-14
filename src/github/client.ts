@@ -20,6 +20,8 @@ export interface PullInfo {
 }
 
 export interface PostedComment {
+  id: number;
+  url: string;
   path: string;
   line: number;
   title: string;
@@ -89,7 +91,7 @@ export class GitHubClient {
       const fp = body.match(FP_RE)?.[1];
       if (!fp) continue;
       const title = body.match(/\*\*(.+?)\*\*/)?.[1] ?? "";
-      out.push({ path: c.path, line: c.line ?? c.original_line ?? 0, title, fingerprint: fp });
+      out.push({ id: c.id, url: c.html_url, path: c.path, line: c.line ?? c.original_line ?? 0, title, fingerprint: fp });
     }
     return out;
   }

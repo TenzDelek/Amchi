@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { createEmbedder, createLLM, keysFromEnv } from "../src/llm/index.js";
-import { parseState, renderInlineComment, renderSummary, FP_RE } from "../src/review/render.js";
+import { fence, parseState, renderInlineComment, renderSummary, FP_RE } from "../src/review/render.js";
 import { runReview } from "../src/run.js";
 import { GitHubClient } from "../src/github/client.js";
 import type { Finding } from "../src/review/reviewer.js";
@@ -112,6 +112,53 @@ describe("rendering", () => {
     const body = renderInlineComment(f);
     expect(body).toContain("```suggestion\nfor (let i = 0; i <= n; i++) {\n```");
     expect(body.match(FP_RE)?.[1]).toBe("abc123");
+  });
+
+  it("renders a priority badge and a copyable fix prompt", () => {
+    const body = renderInlineComment(f);
+    expect(body).toMatch(/^<img src="https:\/\/img\.shields\.io\/badge\/P1-e36209[^"]*" alt="P1"/);
+    expect(body).toContain("<summary>Prompt To Fix With AI</summary>");
+    expect(body).toContain("Path: a.ts\nLine: 3\n\nComment:\n**Off by one**\n\nLoop skips the last item.");
+    expect(body).toContain("For each issue above, determine whether it is valid and should be fixed. If so, fix it directly.");
+    // Text badges for terminals / air-gapped runners.
+    expect(renderInlineComment(f, { badges: "text" })).toMatch(/^\*\*\[P1\]\*\* \*\*Off by one\*\*/);
+  });
+
+  it("uses a longer fence when the content contains code fences", () => {
+    const md = fence("```js\nx\n```");
+    expect(md.startsWith("````\n")).toBe(true);
+    expect(md.endsWith("\n````")).toBe(true);
+  });
+
+  it("renders a Greptile-style summary with score, risk, findings list and agent prompt", () => {
+    const g: Finding = { ...f, path: "b.ts", line: 10, endLine: 12, severity: "critical", title: "SQL injection", body: "Unescaped input.", suggestion: undefined, fingerprint: "def456" };
+    const md = renderSummary(
+      {
+        inline: [f, g], outside: [], dropped: 0, fileSummaries: {}, reviewed: [], skipped: [], failed: [], budgetHit: false,
+        summary: { overview: "Adds sorting.", key_changes: ["sorting"], confidence: 3, confidence_reason: "Fix the injection first.", diagram: null },
+      },
+      {
+        baseSha: "1".repeat(40), headSha: "2".repeat(40), headSubject: "Add sorting", provider: "mock", model: "m",
+        usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@takche", allFiles: [],
+        commentUrls: { abc123: "https://github.com/o/r/pull/1#discussion_r1" },
+      },
+      { reviews: 4 },
+    );
+    expect(md).toContain("## Confidence Score: 3/5");
+    expect(md).toContain("**[Medium risk]** Adds sorting.");
+    expect(md).toContain("Fix the injection first.");
+    // Sorted by severity, linked to the inline comment when one exists.
+    const lines = md.split("\n");
+    const first = lines.find((l) => l.startsWith("1. "))!;
+    const second = lines.find((l) => l.startsWith("2. "))!;
+    expect(first).toContain('alt="P0"');
+    expect(first).toContain("**SQL injection** <sub>`b.ts:10-12`</sub>");
+    expect(second).toContain("**Off by one** [▶](https://github.com/o/r/pull/1#discussion_r1)");
+    expect(md).toContain("<summary>Fix with agent prompt</summary>");
+    expect(md).toContain("### Issue 1\nb.ts:10-12\n**SQL injection**\n\nUnescaped input.");
+    expect(md).toContain("### Issue 2\na.ts:3\n**Off by one**");
+    expect(md).toContain('Reviews (5) · Last reviewed commit: "Add sorting" · Reviewed by Takche');
+    expect(parseState(md).reviews).toBe(5);
   });
 
   it("round-trips state through the summary comment, even with '--' in text", () => {

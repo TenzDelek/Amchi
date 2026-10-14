@@ -124,6 +124,7 @@ async function main() {
         renderLocalReport(res.out, {
           baseSha: res.mergeBase,
           headSha,
+          headSubject: title,
           provider: llm.provider,
           model: llm.model,
           usage: llm.usage,

@@ -6,8 +6,8 @@ It builds a **code graph** of the whole repository (functions, classes, imports,
 
 ## What it does
 
-- **Inline review comments** on bugs, logic errors, breaking changes, security and performance problems, each with a severity and a one-click ` ```suggestion ` fix when the fix is small and certain.
-- **PR summary comment** with an overview, key changes, a **confidence score (1–5)**, a Mermaid sequence diagram and a per-file change table. It updates in place on every push.
+- **Inline review comments** on bugs, logic errors, breaking changes, security and performance problems. Each one carries a colored **priority badge (P0–P4)**, a one-click ` ```suggestion ` fix when the fix is small and certain, and a collapsible **"Prompt To Fix With AI"** block you can paste into Claude Code, Cursor or Copilot.
+- **PR summary comment** headed by a **Confidence Score (1–5)** and a risk label, followed by a numbered findings list that links to each inline comment, a **"Fix with agent prompt"** block covering every issue, a Mermaid sequence diagram and a per-file change table. It updates in place on every push.
 - **Incremental reviews.** New pushes only review the commits since the last review, and comments are never posted twice.
 - **Impact analysis from the graph:** callers of changed functions, removed functions that are still referenced, and deleted files that are still imported. The last check is deterministic, with no LLM involved.
 - **Chat.** Comment `@takche how is the session token validated?` on any PR or issue, or inside an inline thread, and it answers using the code graph with links to the code.
@@ -76,6 +76,7 @@ Everything lives in `.codereview.yml`; see [the annotated example](examples/.cod
 | `review.verify` | `false` | Second pass that removes false positives (about 2x tokens). |
 | `review.incremental` | `true` | Only review new commits on later pushes. |
 | `review.fail_on` | `none` | Fail the check (to block merging) on e.g. `high`. |
+| `review.badges` | `image` | `text` swaps the colored P0–P4 badge images for plain `[P1]` labels (for runners without internet access). |
 | `limits.max_total_input_tokens` | `1,500,000` | Hard stop per run. Protects against giant PRs. |
 | `embeddings` | `auto` | `off` uses keyword + graph retrieval only, with no embedding calls. |
 

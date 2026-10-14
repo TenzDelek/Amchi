@@ -96,10 +96,10 @@ Be concrete and brief. Write for an engineer who will review this PR next.
 
 Return JSON only:
 {
-  "overview": string,         /* 2-4 sentences in markdown: what this PR does and how */
+  "overview": string,         /* one or two plain sentences: what this PR does (no markdown headings) */
   "key_changes": string[],    /* 2-6 bullets, most important first */
   "confidence": number,       /* 1-5: how safe this PR is to merge. 5 = safe, 1 = likely to break things */
-  "confidence_reason": string, /* one or two sentences explaining the score, referencing the most important issues */
+  "confidence_reason": string, /* one sentence: what must be fixed before merging, or why it is safe; name the most important issue */
   "diagram": string | null    /* ${
     cfg.summary.diagram
       ? "a small Mermaid sequenceDiagram or flowchart (no code fences) showing the main flow this PR changes, or null if the PR is trivial (config, docs, renames)"

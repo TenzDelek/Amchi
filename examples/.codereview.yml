@@ -35,6 +35,7 @@ review:
   verify: false               # second pass to drop false positives (~2x cost)
   request_changes_on: none    # e.g. critical -> submit "Request changes"
   fail_on: none               # e.g. high -> fail the check
+  badges: image               # image (colored P0–P4 badges) | text (plain [P1] labels, no external images)
 
 summary:
   enabled: true

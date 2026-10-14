@@ -10981,7 +10981,8 @@ var DEFAULT_CONFIG = {
     incremental: true,
     suggestions: true,
     focus: ["bugs", "logic", "security", "performance", "error-handling", "maintainability"],
-    request_changes_on: "none"
+    request_changes_on: "none",
+    badges: "image"
   },
   summary: {
     enabled: true,
@@ -11048,6 +11049,7 @@ function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   const cfg = deepMerge(deepMerge(DEFAULT_CONFIG, fileCfg), overrides);
   cfg.rules = (cfg.rules ?? []).map((r) => typeof r === "string" ? { rule: r } : r);
   if (!SEVERITY_ORDER.includes(cfg.review.min_severity)) cfg.review.min_severity = "low";
+  if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
 }
 function matchesAny(path2, globs) {
@@ -11281,10 +11283,10 @@ Be concrete and brief. Write for an engineer who will review this PR next.
 
 Return JSON only:
 {
-  "overview": string,         /* 2-4 sentences in markdown: what this PR does and how */
+  "overview": string,         /* one or two plain sentences: what this PR does (no markdown headings) */
   "key_changes": string[],    /* 2-6 bullets, most important first */
   "confidence": number,       /* 1-5: how safe this PR is to merge. 5 = safe, 1 = likely to break things */
-  "confidence_reason": string, /* one or two sentences explaining the score, referencing the most important issues */
+  "confidence_reason": string, /* one sentence: what must be fixed before merging, or why it is safe; name the most important issue */
   "diagram": string | null    /* ${cfg.summary.diagram ? "a small Mermaid sequenceDiagram or flowchart (no code fences) showing the main flow this PR changes, or null if the PR is trivial (config, docs, renames)" : "always null"} */
 }`;
 var CHAT_SYSTEM = `You are an expert engineer answering questions about a codebase inside a pull request conversation.
@@ -12623,9 +12625,9 @@ var Searcher = class {
       this.vector(query, k * 3, filter2)
     ]);
     const fused = /* @__PURE__ */ new Map();
-    const add = (list, weight) => list.forEach((h, rank) => {
+    const add = (list, weight) => list.forEach((h, rank2) => {
       const cur = fused.get(h.chunk.id) ?? { chunk: h.chunk, score: 0 };
-      cur.score += weight / (60 + rank);
+      cur.score += weight / (60 + rank2);
       fused.set(h.chunk.id, cur);
     });
     add(lex, 1);
@@ -13143,18 +13145,69 @@ function createEmbedder(cfg, keys) {
 var SUMMARY_MARKER = "<!-- takche:summary -->";
 var FP_MARKER = (fp) => `<!-- takche:fp=${fp} -->`;
 var FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
-var SEV_ICON = {
-  critical: "\u{1F534}",
-  high: "\u{1F7E0}",
-  medium: "\u{1F7E1}",
-  low: "\u{1F535}",
-  info: "\u26AA"
+var defaultBadges = "image";
+var PRIORITY = {
+  critical: "P0",
+  high: "P1",
+  medium: "P2",
+  low: "P3",
+  info: "P4"
 };
-function renderInlineComment(f) {
-  const parts = [`${SEV_ICON[f.severity]} **${escapeInline(f.title)}** \xB7 \`${f.severity}\` \xB7 ${f.category}`, "", f.body.trim()];
+var PRIORITY_COLOR = {
+  critical: "d73a49",
+  high: "e36209",
+  medium: "dbab09",
+  low: "0969da",
+  info: "6e7781"
+};
+function badge(sev, style = defaultBadges) {
+  const p = PRIORITY[sev];
+  if (style === "text") return `**[${p}]**`;
+  return `<img src="https://img.shields.io/badge/${p}-${PRIORITY_COLOR[sev]}?style=flat-square" alt="${p}" title="${p} \xB7 ${sev}" valign="middle">`;
+}
+var FIX_INSTRUCTION = "For each issue above, determine whether it is valid and should be fixed. If so, fix it directly.";
+function location(f) {
+  if (f.line <= 1 && !f.endLine) return f.path;
+  return f.endLine && f.endLine > f.line ? `${f.path}:${f.line}-${f.endLine}` : `${f.path}:${f.line}`;
+}
+function fence(text, lang = "") {
+  const longest = Math.max(2, ...[...text.matchAll(/`+/g)].map((m) => m[0].length));
+  const f = "`".repeat(longest + 1);
+  return `${f}${lang}
+${text}
+${f}`;
+}
+function fixPrompt(f) {
+  const lines = [
+    "This is a comment left during a code review.",
+    `Path: ${f.path}`,
+    `Line: ${f.endLine && f.endLine > f.line ? `${f.line}-${f.endLine}` : f.line}`,
+    "",
+    "Comment:",
+    `**${escapeInline(f.title)}**`,
+    "",
+    f.body.trim()
+  ];
+  if (f.suggestion !== void 0) lines.push("", "Suggested replacement for the lines above:", f.suggestion);
+  lines.push("", "---", "", FIX_INSTRUCTION);
+  return lines.join("\n");
+}
+function fixAllPrompt(findings) {
+  const parts = [];
+  findings.forEach((f, i) => {
+    parts.push(`### Issue ${i + 1}`, location(f), `**${escapeInline(f.title)}**`, "", f.body.trim());
+    if (f.suggestion !== void 0) parts.push("", "Suggested replacement:", f.suggestion);
+    parts.push("");
+  });
+  parts.push("---", "", FIX_INSTRUCTION);
+  return parts.join("\n");
+}
+function renderInlineComment(f, opts = {}) {
+  const parts = [`${badge(f.severity, opts.badges)} **${escapeInline(f.title)}**`, "", f.body.trim()];
   if (f.suggestion !== void 0) {
     parts.push("", "```suggestion", f.suggestion, "```");
   }
+  parts.push("", "<details>", "<summary>Prompt To Fix With AI</summary>", "", fence(fixPrompt(f)), "", "</details>");
   parts.push("", FP_MARKER(f.fingerprint));
   return parts.join("\n");
 }
@@ -13176,39 +13229,51 @@ function escapeInline(s) {
 function cell(s) {
   return s.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }
-function renderSummary(out2, meta, state) {
-  const L = [SUMMARY_MARKER, "## \u{1F50D} Code review summary", ""];
+function riskLabel(confidence) {
+  if (confidence >= 5) return "Low risk";
+  if (confidence === 4) return "Low risk";
+  if (confidence === 3) return "Medium risk";
+  if (confidence === 2) return "High risk";
+  return "Very high risk";
+}
+function renderSummary(out2, meta, state, opts = {}) {
+  const L = [SUMMARY_MARKER];
   const s = out2.summary;
   if (s) {
-    if (s.overview) L.push(s.overview, "");
+    L.push(`## Confidence Score: ${s.confidence}/5`, "");
+    const overview = s.overview.trim();
+    L.push(`**[${riskLabel(s.confidence)}]** ${overview}`, "");
+    if (s.confidence_reason) L.push(s.confidence_reason.trim(), "");
     if (s.key_changes.length) {
-      L.push("**Key changes**");
+      L.push("<details>", "<summary>Key changes</summary>", "");
       for (const k of s.key_changes) L.push(`- ${k}`);
-      L.push("");
+      L.push("", "</details>", "");
     }
+  } else {
+    L.push("## Code review", "");
   }
   const issues = { ...state.issues ?? {} };
-  const current = [...out2.inline, ...out2.outside];
+  const current = [...out2.inline, ...out2.outside].sort((a, b) => rank(b.severity) - rank(a.severity));
   const newCount = current.filter((f) => !issues[f.fingerprint]).length;
   for (const f of current) issues[f.fingerprint] = f.severity;
-  const counts = /* @__PURE__ */ new Map();
-  for (const sev of Object.values(issues)) counts.set(sev, (counts.get(sev) ?? 0) + 1);
-  const countText = ["critical", "high", "medium", "low", "info"].filter((k) => counts.get(k)).map((k) => `${SEV_ICON[k]} ${counts.get(k)} ${k}`).join(" \xB7 ");
-  if (s) {
-    const bar = "\u25CF".repeat(s.confidence) + "\u25CB".repeat(5 - s.confidence);
-    L.push(`**Confidence score: ${s.confidence}/5** \`${bar}\`${s.confidence_reason ? ` \u2014 ${s.confidence_reason}` : ""}`, "");
-  }
-  const total = Object.keys(issues).length;
-  L.push(
-    total ? `**Issues found:** ${countText}${meta.incrementalFrom ? ` (${newCount} new in this update)` : out2.inline.length ? ` (${out2.inline.length} posted inline)` : ""}` : "**Issues found:** none \u{1F389}",
-    ""
-  );
-  if (out2.outside.length) {
-    L.push("### Notes outside the diff");
-    for (const f of out2.outside) {
-      L.push(`- ${SEV_ICON[f.severity]} **${escapeInline(f.title)}** (\`${f.path}${f.line > 1 ? `:${f.line}` : ""}\`) \u2014 ${f.body.split("\n")[0]}`);
-    }
+  L.push("## Findings", "");
+  if (current.length) {
+    current.forEach((f, i) => {
+      const url = meta.commentUrls?.[f.fingerprint];
+      const where = url ? ` [\u25B6](${url})` : ` <sub>\`${location(f)}\`</sub>`;
+      L.push(`${i + 1}. ${badge(f.severity, opts.badges)} **${escapeInline(f.title)}**${where}`);
+    });
     L.push("");
+    const counts = /* @__PURE__ */ new Map();
+    for (const sev of Object.values(issues)) counts.set(sev, (counts.get(sev) ?? 0) + 1);
+    const countText = ["critical", "high", "medium", "low", "info"].filter((k) => counts.get(k)).map((k) => `${counts.get(k)} ${PRIORITY[k]}`).join(" \xB7 ");
+    const total = Object.keys(issues).length;
+    if (meta.incrementalFrom && total > current.length) {
+      L.push(`<sub>${newCount} new in this update \xB7 ${total} total on this PR (${countText})</sub>`, "");
+    }
+    L.push("<details>", "<summary>Fix with agent prompt</summary>", "", fence(fixAllPrompt(current), "markdown"), "", "</details>", "");
+  } else {
+    L.push("No issues found. \u{1F389}", "");
   }
   if (s?.diagram) {
     L.push("<details><summary>\u{1F4CA} Sequence diagram</summary>", "", "```mermaid", s.diagram, "```", "", "</details>", "");
@@ -13232,25 +13297,34 @@ function renderSummary(out2, meta, state) {
   if (limitSkipped.length) notes.push(`\u2139\uFE0F ${limitSkipped.length} file(s) skipped by \`review.max_files\`.`);
   if (out2.dropped > 0) notes.push(`\u2139\uFE0F ${out2.dropped} lower-priority finding(s) not posted (thresholds / \`max_comments\`).`);
   if (notes.length) L.push(...notes.map((n) => `${n}  `), "");
+  const reviews = (state.reviews ?? 0) + 1;
   const range2 = meta.incrementalFrom ? `${meta.incrementalFrom.slice(0, 7)}\u2026${meta.headSha.slice(0, 7)} (incremental)` : `${meta.baseSha.slice(0, 7)}\u2026${meta.headSha.slice(0, 7)}`;
+  const commit = meta.headSubject ? `"${truncate(escapeInline(meta.headSubject), 60)}"` : meta.headSha.slice(0, 7);
   const u = meta.usage;
   L.push(
-    `<sub>Reviewed ${range2} \xB7 ${meta.provider}/${meta.model} \xB7 ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens \xB7 Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`
+    `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Takche"}</sub>`,
+    `<sub>${range2} \xB7 ${meta.provider}/${meta.model} \xB7 ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens \xB7 Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`
   );
   const complete = !out2.failed.length && !out2.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues })} -->`);
+  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");
+}
+function rank(s) {
+  return ["info", "low", "medium", "high", "critical"].indexOf(s);
+}
+function truncate(s, n) {
+  return s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
 }
 function fmtK(n) {
   return n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k` : String(n);
 }
 function renderLocalReport(out2, meta) {
-  const summary = renderSummary(out2, meta, {}).split("\n").filter((l) => !l.startsWith("<!--")).join("\n");
+  const opts = { badges: "text" };
+  const summary = renderSummary(out2, meta, {}, opts).split("\n").filter((l) => !l.startsWith("<!--")).join("\n");
   const L = [summary, "", "---", "", `## Inline comments (${out2.inline.length})`, ""];
   for (const f of out2.inline) {
-    const loc = f.endLine ? `${f.path}:${f.line}-${f.endLine}` : `${f.path}:${f.line}`;
-    L.push(`### ${loc}`, renderInlineComment(f).replace(FP_RE, "").trim(), "");
+    L.push(`### ${location(f)}`, renderInlineComment(f, opts).replace(FP_RE, "").trim(), "");
   }
   return L.join("\n");
 }
@@ -13258,8 +13332,8 @@ function renderLocalReport(out2, meta) {
 // src/llm/json.ts
 function parseModelJson(text) {
   const candidates = [];
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) candidates.push(fence[1]);
+  const fence2 = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence2) candidates.push(fence2[1]);
   const balanced2 = extractBalanced(text);
   if (balanced2) candidates.push(balanced2);
   candidates.push(text);
@@ -14068,6 +14142,7 @@ async function main() {
         renderLocalReport(res.out, {
           baseSha: res.mergeBase,
           headSha,
+          headSubject: title,
           provider: llm.provider,
           model: llm.model,
           usage: llm.usage,

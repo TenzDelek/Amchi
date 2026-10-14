@@ -48,6 +48,8 @@ export interface Config {
     suggestions: boolean;
     focus: string[];
     request_changes_on: "none" | Severity;
+    /** Severity badges in comments: colored image badges (P0–P4) or plain text labels. */
+    badges: "image" | "text";
   };
   summary: {
     enabled: boolean;
@@ -108,6 +110,7 @@ export const DEFAULT_CONFIG: Config = {
     suggestions: true,
     focus: ["bugs", "logic", "security", "performance", "error-handling", "maintainability"],
     request_changes_on: "none",
+    badges: "image",
   },
   summary: {
     enabled: true,
@@ -200,6 +203,7 @@ export function loadConfig(
   // Normalise rules: allow plain strings.
   cfg.rules = (cfg.rules ?? []).map((r: Rule | string) => (typeof r === "string" ? { rule: r } : r));
   if (!SEVERITY_ORDER.includes(cfg.review.min_severity)) cfg.review.min_severity = "low";
+  if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
 }
 
