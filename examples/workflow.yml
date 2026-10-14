@@ -43,7 +43,7 @@ jobs:
           key: amchi-${{ runner.os }}-${{ github.run_id }}
           restore-keys: amchi-${{ runner.os }}-
 
-      - uses: TenzDelek/Amchi@v1
+      - uses: TenzDelek/Amchi@v2
         with:
           # Provide at least one key. With several, `provider` picks (default: anthropic > openai > gemini).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

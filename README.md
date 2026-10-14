@@ -50,10 +50,10 @@ For Dart, `package:<name>/…` imports resolve through the `name:` in `pubspec.y
 **1. Publish the action.** Push this folder to a repo in your org, for example `your-org/amchi`, and tag it:
 
 ```bash
-git init && git add -A && git commit -m "Amchi v1"
+git init && git add -A && git commit -m "Amchi v2"
 git remote add origin git@github.com:your-org/amchi.git
 git push -u origin main
-git tag v1 && git push origin v1
+git tag v2 && git push origin v2
 ```
 
 `dist/` is committed on purpose because GitHub runs the action from it. If the action repo is private, allow access in its *Settings → Actions → General → Access* so your other repos can use it.
