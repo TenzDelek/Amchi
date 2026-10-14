@@ -34720,7 +34720,7 @@ minimatch.unescape = unescape;
 
 // src/util/log.ts
 var inActions = !!process.env.GITHUB_ACTIONS;
-var verbose = !!process.env.TAKCHE_DEBUG;
+var verbose = !!process.env.AMCHI_DEBUG;
 function setVerbose(v) {
   verbose = v;
 }
@@ -34843,11 +34843,11 @@ var DEFAULT_CONFIG = {
   },
   chat: {
     enabled: true,
-    trigger: "@takche",
+    trigger: "@amchi",
     allowed_associations: ["OWNER", "MEMBER", "COLLABORATOR"]
   },
   index: {
-    dir: ".takche",
+    dir: ".amchi",
     max_file_kb: 256,
     max_files: 25e3,
     ignore: []
@@ -34872,7 +34872,7 @@ function deepMerge(base, over) {
   }
   return out2;
 }
-var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".takche.yml", ".takche.yaml"];
+var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".amchi.yml", ".amchi.yaml"];
 function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   let fileCfg = {};
   const candidates = explicitPath ? [explicitPath] : CONFIG_FILENAMES;
@@ -35418,10 +35418,14 @@ var Git = class {
 var import_github = __toESM(require_github(), 1);
 
 // src/review/render.ts
-var SUMMARY_MARKER = "<!-- takche:summary -->";
-var FP_MARKER = (fp) => `<!-- takche:fp=${fp} -->`;
-var FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
-var STATE_RE = /<!-- takche:state (.*?) -->/gs;
+var SUMMARY_MARKER = "<!-- amchi:summary -->";
+var FP_MARKER = (fp) => `<!-- amchi:fp=${fp} -->`;
+var MARKER_PREFIX_RE = /<!-- (?:amchi|takche):/;
+var FP_RE = /<!-- (?:amchi|takche):fp=([a-f0-9]+) -->/;
+var STATE_RE = /<!-- (?:amchi|takche):state (.*?) -->/gs;
+function isSummaryComment(body2) {
+  return /<!-- (?:amchi|takche):summary -->/.test(body2);
+}
 var defaultBadges = "image";
 function setBadgeStyle(style) {
   defaultBadges = style;
@@ -35592,12 +35596,12 @@ function renderSummary(out2, meta, state, opts = {}) {
   const commit = meta.headSubject ? `"${truncate(escapeInline(meta.headSubject), 60)}"` : meta.headSha.slice(0, 7);
   const u = meta.usage;
   L.push(
-    `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Takche"}</sub>`,
+    `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Amchi"}</sub>`,
     `<sub>${range2} \xB7 ${meta.provider}/${meta.model} \xB7 ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens \xB7 Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`
   );
   const complete = !out2.failed.length && !out2.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");
 }
 function rank(s) {
@@ -35682,7 +35686,7 @@ var GitHubClient = class {
       per_page: 100
     });
     const me = await this.botLogin();
-    const c = comments.find((x) => x.user?.login === me && x.body?.includes(SUMMARY_MARKER));
+    const c = comments.find((x) => x.user?.login === me && isSummaryComment(x.body ?? ""));
     return c ? { id: c.id, body: c.body ?? "" } : null;
   }
   async upsertSummary(number, body2, existingId) {
@@ -36465,7 +36469,7 @@ function listRepoFiles(root) {
     const out2 = [];
     const walk = (rel) => {
       for (const name of readdirSync(join3(root, rel))) {
-        if (name === ".git" || name === "node_modules" || name === ".takche") continue;
+        if (name === ".git" || name === "node_modules" || name === ".amchi") continue;
         const r = rel ? `${rel}/${name}` : name;
         const st = lstatSync(join3(root, r));
         if (st.isDirectory()) walk(r);
@@ -37407,7 +37411,7 @@ var TrackedLLM = class {
     }
     const t0 = Date.now();
     const res = await this.inner.chat(req);
-    const dump = process.env.TAKCHE_DUMP_PROMPTS;
+    const dump = process.env.AMCHI_DUMP_PROMPTS;
     if (dump) {
       mkdirSync3(dump, { recursive: true });
       const name = `${String(this.usage.calls + 1).padStart(3, "0")}-${(req.label ?? "call").replace(/[^\w.-]+/g, "_").slice(0, 80)}.md`;
@@ -38223,7 +38227,7 @@ async function main() {
   const event = import_github2.context.eventName;
   const mode = input("mode") || "auto";
   const payload = import_github2.context.payload;
-  log.info(`takche \xB7 event=${event} mode=${mode}`);
+  log.info(`amchi \xB7 event=${event} mode=${mode}`);
   if (mode === "index" || mode === "auto" && ["push", "workflow_dispatch", "schedule"].includes(event)) {
     const embedder = createEmbedder(cfg, keys);
     const ws = await openWorkspace(root, cfg, embedder, { commit: import_github2.context.sha });
@@ -38235,7 +38239,7 @@ async function main() {
     const comment = payload.comment;
     const body2 = comment?.body ?? "";
     if (payload.action !== "created" || comment?.user?.type === "Bot") return;
-    if (body2.includes("<!-- takche:") || await gh.isOwnComment(comment?.user)) return;
+    if (MARKER_PREFIX_RE.test(body2) || await gh.isOwnComment(comment?.user)) return;
     const number = payload.issue?.number ?? payload.pull_request?.number;
     const isPr = event === "pull_request_review_comment" || !!payload.issue?.pull_request;
     const pr = isPr && number ? await gh.getPull(number) : void 0;
@@ -38438,7 +38442,7 @@ async function reviewPr(gh, cfg, keys, root, pr, opts) {
       trigger: cfg.chat.trigger,
       allFiles: res.allFiles,
       commentUrls,
-      botName: cfg.chat.trigger.replace(/^@/, "") || "Takche"
+      botName: cfg.chat.trigger.replace(/^@/, "") || "Amchi"
     },
     state
   );

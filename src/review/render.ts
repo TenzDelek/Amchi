@@ -3,10 +3,15 @@ import type { FileDiff } from "../git/diff.js";
 import type { Usage } from "../llm/types.js";
 import type { Finding, ReviewOutput } from "./reviewer.js";
 
-export const SUMMARY_MARKER = "<!-- takche:summary -->";
-export const FP_MARKER = (fp: string) => `<!-- takche:fp=${fp} -->`;
-export const FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
-const STATE_RE = /<!-- takche:state (.*?) -->/gs;
+export const SUMMARY_MARKER = "<!-- amchi:summary -->";
+export const FP_MARKER = (fp: string) => `<!-- amchi:fp=${fp} -->`;
+// Comments posted before the rename to Amchi carry "takche:" markers; keep reading them.
+export const MARKER_PREFIX_RE = /<!-- (?:amchi|takche):/;
+export const FP_RE = /<!-- (?:amchi|takche):fp=([a-f0-9]+) -->/;
+const STATE_RE = /<!-- (?:amchi|takche):state (.*?) -->/gs;
+export function isSummaryComment(body: string): boolean {
+  return /<!-- (?:amchi|takche):summary -->/.test(body);
+}
 
 export interface ReviewState {
   lastSha?: string;
@@ -251,14 +256,14 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   const commit = meta.headSubject ? `"${truncate(escapeInline(meta.headSubject), 60)}"` : meta.headSha.slice(0, 7);
   const u = meta.usage;
   L.push(
-    `<sub>Reviews (${reviews}) · Last reviewed commit: ${commit} · Reviewed by ${meta.botName ?? "Takche"}</sub>`,
+    `<sub>Reviews (${reviews}) · Last reviewed commit: ${commit} · Reviewed by ${meta.botName ?? "Amchi"}</sub>`,
     `<sub>${range} · ${meta.provider}/${meta.model} · ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens · ` +
       `Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`,
   );
   // If anything wasn't reviewed, keep the old lastSha so the next run covers it again.
   const complete = !out.failed.length && !out.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");
 }
 

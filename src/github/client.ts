@@ -1,6 +1,6 @@
 import { getOctokit } from "@actions/github";
 import type { Finding } from "../review/reviewer.js";
-import { FP_RE, renderInlineComment, SUMMARY_MARKER } from "../review/render.js";
+import { FP_RE, isSummaryComment, renderInlineComment } from "../review/render.js";
 import { log } from "../util/log.js";
 
 type Octokit = ReturnType<typeof getOctokit>;
@@ -105,7 +105,7 @@ export class GitHubClient {
     });
     const me = await this.botLogin();
     // Only our own summary: anyone can paste the marker into a comment.
-    const c = comments.find((x) => x.user?.login === me && x.body?.includes(SUMMARY_MARKER));
+    const c = comments.find((x) => x.user?.login === me && isSummaryComment(x.body ?? ""));
     return c ? { id: c.id, body: c.body ?? "" } : null;
   }
 

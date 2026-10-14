@@ -73,7 +73,7 @@ export class TrackedLLM implements LLM {
     }
     const t0 = Date.now();
     const res = await this.inner.chat(req);
-    const dump = process.env.TAKCHE_DUMP_PROMPTS;
+    const dump = process.env.AMCHI_DUMP_PROMPTS;
     if (dump) {
       // Debug aid: write every prompt/response pair to a folder.
       mkdirSync(dump, { recursive: true });

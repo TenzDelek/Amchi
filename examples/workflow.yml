@@ -18,7 +18,7 @@ permissions:
 
 concurrency:
   # Reviews of the same PR replace each other; every comment (question) gets its own run.
-  group: takche-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
+  group: amchi-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' ||
       github.event_name == 'push' ||
-      (contains(github.event.comment.body, '@takche') && github.event.comment.user.type != 'Bot')
+      (contains(github.event.comment.body, '@amchi') && github.event.comment.user.type != 'Bot')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -39,11 +39,11 @@ jobs:
       # Persist the code graph + embeddings between runs.
       - uses: actions/cache@v5
         with:
-          path: .takche
-          key: takche-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: takche-${{ runner.os }}-
+          path: .amchi
+          key: amchi-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: amchi-${{ runner.os }}-
 
-      - uses: TenzDelek/Takche@v1
+      - uses: TenzDelek/Amchi@v1
         with:
           # Provide at least one key. With several, `provider` picks (default: anthropic > openai > gemini).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

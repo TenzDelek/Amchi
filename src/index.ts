@@ -7,7 +7,7 @@ import { parseUnifiedDiff } from "./git/diff.js";
 import { GitHubClient, type PullInfo } from "./github/client.js";
 import { openWorkspace } from "./graph/workspace.js";
 import { createEmbedder, createLLM, keysFromEnv, type TrackedLLM } from "./llm/index.js";
-import { renderSummary, parseState, setBadgeStyle, type ReviewState } from "./review/render.js";
+import { MARKER_PREFIX_RE, renderSummary, parseState, setBadgeStyle, type ReviewState } from "./review/render.js";
 import { runReview } from "./run.js";
 import { similar } from "./review/reviewer.js";
 import { isAbsolute } from "node:path";
@@ -52,7 +52,7 @@ async function main() {
   const mode = input("mode") || "auto";
   const payload = context.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-  log.info(`takche · event=${event} mode=${mode}`);
+  log.info(`amchi · event=${event} mode=${mode}`);
 
   if (mode === "index" || (mode === "auto" && ["push", "workflow_dispatch", "schedule"].includes(event))) {
     const embedder = createEmbedder(cfg, keys);
@@ -68,7 +68,7 @@ async function main() {
     const body: string = comment?.body ?? "";
     if (payload.action !== "created" || comment?.user?.type === "Bot") return;
     // Never answer ourselves (matters when github_token is a PAT posting as a user).
-    if (body.includes("<!-- takche:") || (await gh.isOwnComment(comment?.user))) return;
+    if (MARKER_PREFIX_RE.test(body) || (await gh.isOwnComment(comment?.user))) return;
     const number: number | undefined = payload.issue?.number ?? payload.pull_request?.number;
     const isPr = event === "pull_request_review_comment" || !!payload.issue?.pull_request;
     // The workspace holds the PR head, which the PR author controls: read config from the base commit.
@@ -299,7 +299,7 @@ async function reviewPr(
       trigger: cfg.chat.trigger,
       allFiles: res.allFiles,
       commentUrls,
-      botName: cfg.chat.trigger.replace(/^@/, "") || "Takche",
+      botName: cfg.chat.trigger.replace(/^@/, "") || "Amchi",
     },
     state,
   );

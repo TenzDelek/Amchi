@@ -139,7 +139,7 @@ describe("rendering", () => {
       },
       {
         baseSha: "1".repeat(40), headSha: "2".repeat(40), headSubject: "Add sorting", provider: "mock", model: "m",
-        usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@takche", allFiles: [],
+        usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@amchi", allFiles: [],
         commentUrls: { abc123: "https://github.com/o/r/pull/1#discussion_r1" },
       },
       { reviews: 4 },
@@ -157,14 +157,14 @@ describe("rendering", () => {
     expect(md).toContain("<summary>Fix with agent prompt</summary>");
     expect(md).toContain("### Issue 1\nb.ts:10-12\n**SQL injection**\n\nUnescaped input.");
     expect(md).toContain("### Issue 2\na.ts:3\n**Off by one**");
-    expect(md).toContain('Reviews (5) · Last reviewed commit: "Add sorting" · Reviewed by Takche');
+    expect(md).toContain('Reviews (5) · Last reviewed commit: "Add sorting" · Reviewed by Amchi');
     expect(parseState(md).reviews).toBe(5);
   });
 
   it("round-trips state through the summary comment, even with '--' in text", () => {
     const md = renderSummary(
       { inline: [f], outside: [], dropped: 0, fileSummaries: { "a.ts": "uses --flag --> safely" }, summary: null, reviewed: [], skipped: [], failed: [], budgetHit: false },
-      { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@takche", allFiles: [] },
+      { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@amchi", allFiles: [] },
       {},
     );
     const comments = md.match(/<!--[\s\S]*?-->/g)!;

@@ -10869,7 +10869,7 @@ minimatch.unescape = unescape;
 
 // src/util/log.ts
 var inActions = !!process.env.GITHUB_ACTIONS;
-var verbose = !!process.env.TAKCHE_DEBUG;
+var verbose = !!process.env.AMCHI_DEBUG;
 function setVerbose(v) {
   verbose = v;
 }
@@ -10992,11 +10992,11 @@ var DEFAULT_CONFIG = {
   },
   chat: {
     enabled: true,
-    trigger: "@takche",
+    trigger: "@amchi",
     allowed_associations: ["OWNER", "MEMBER", "COLLABORATOR"]
   },
   index: {
-    dir: ".takche",
+    dir: ".amchi",
     max_file_kb: 256,
     max_files: 25e3,
     ignore: []
@@ -11021,7 +11021,7 @@ function deepMerge(base, over) {
   }
   return out2;
 }
-var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".takche.yml", ".takche.yaml"];
+var CONFIG_FILENAMES = [".codereview.yml", ".codereview.yaml", ".amchi.yml", ".amchi.yaml"];
 function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   let fileCfg = {};
   const candidates = explicitPath ? [explicitPath] : CONFIG_FILENAMES;
@@ -12242,7 +12242,7 @@ function listRepoFiles(root) {
     const out2 = [];
     const walk = (rel) => {
       for (const name of readdirSync(join3(root, rel))) {
-        if (name === ".git" || name === "node_modules" || name === ".takche") continue;
+        if (name === ".git" || name === "node_modules" || name === ".amchi") continue;
         const r = rel ? `${rel}/${name}` : name;
         const st = lstatSync(join3(root, r));
         if (st.isDirectory()) walk(r);
@@ -13184,7 +13184,7 @@ var TrackedLLM = class {
     }
     const t0 = Date.now();
     const res = await this.inner.chat(req);
-    const dump = process.env.TAKCHE_DUMP_PROMPTS;
+    const dump = process.env.AMCHI_DUMP_PROMPTS;
     if (dump) {
       mkdirSync3(dump, { recursive: true });
       const name = `${String(this.usage.calls + 1).padStart(3, "0")}-${(req.label ?? "call").replace(/[^\w.-]+/g, "_").slice(0, 80)}.md`;
@@ -13260,9 +13260,9 @@ function createEmbedder(cfg, keys) {
 }
 
 // src/review/render.ts
-var SUMMARY_MARKER = "<!-- takche:summary -->";
-var FP_MARKER = (fp) => `<!-- takche:fp=${fp} -->`;
-var FP_RE = /<!-- takche:fp=([a-f0-9]+) -->/;
+var SUMMARY_MARKER = "<!-- amchi:summary -->";
+var FP_MARKER = (fp) => `<!-- amchi:fp=${fp} -->`;
+var FP_RE = /<!-- (?:amchi|takche):fp=([a-f0-9]+) -->/;
 var defaultBadges = "image";
 var PRIORITY = {
   critical: "P0",
@@ -13420,12 +13420,12 @@ function renderSummary(out2, meta, state, opts = {}) {
   const commit = meta.headSubject ? `"${truncate(escapeInline(meta.headSubject), 60)}"` : meta.headSha.slice(0, 7);
   const u = meta.usage;
   L.push(
-    `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Takche"}</sub>`,
+    `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Amchi"}</sub>`,
     `<sub>${range2} \xB7 ${meta.provider}/${meta.model} \xB7 ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens \xB7 Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`
   );
   const complete = !out2.failed.length && !out2.budgetHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- takche:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");
 }
 function rank(s) {
@@ -14154,16 +14154,16 @@ async function runReview(input) {
 }
 
 // src/cli.ts
-var HELP = `takche \u2014 AI code review with a code graph
+var HELP = `amchi \u2014 AI code review with a code graph
 
 Usage:
-  takche review [--base <ref>] [--head <ref>] [options]
+  amchi review [--base <ref>] [--head <ref>] [options]
       Review the changes between base and head (default: merge-base with main..HEAD)
       and print a markdown report.
-  takche ask "<question>" [options]
+  amchi ask "<question>" [options]
       Ask a question about the repository.
-  takche index [options]
-      Build or update the code graph cache (.takche/).
+  amchi index [options]
+      Build or update the code graph cache (.amchi/).
 
 Options:
   --repo <dir>        Repository root (default: current directory)
@@ -14228,7 +14228,7 @@ async function main() {
   }
   if (cmd === "ask") {
     const question = pos.slice(1).join(" ").trim();
-    if (!question) throw new Error('Usage: takche ask "<question>"');
+    if (!question) throw new Error('Usage: amchi ask "<question>"');
     const llm = createLLM(cfg, keys);
     const ws = await openWorkspace(root, cfg, createEmbedder(cfg, keys));
     const answer = await answerQuestion({ question, graph: ws.graph, searcher: ws.searcher, llm });

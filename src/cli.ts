@@ -10,16 +10,16 @@ import { renderLocalReport } from "./review/render.js";
 import { runReview } from "./run.js";
 import { log, setVerbose } from "./util/log.js";
 
-const HELP = `takche — AI code review with a code graph
+const HELP = `amchi — AI code review with a code graph
 
 Usage:
-  takche review [--base <ref>] [--head <ref>] [options]
+  amchi review [--base <ref>] [--head <ref>] [options]
       Review the changes between base and head (default: merge-base with main..HEAD)
       and print a markdown report.
-  takche ask "<question>" [options]
+  amchi ask "<question>" [options]
       Ask a question about the repository.
-  takche index [options]
-      Build or update the code graph cache (.takche/).
+  amchi index [options]
+      Build or update the code graph cache (.amchi/).
 
 Options:
   --repo <dir>        Repository root (default: current directory)
@@ -90,7 +90,7 @@ async function main() {
 
   if (cmd === "ask") {
     const question = pos.slice(1).join(" ").trim();
-    if (!question) throw new Error('Usage: takche ask "<question>"');
+    if (!question) throw new Error('Usage: amchi ask "<question>"');
     const llm = createLLM(cfg, keys);
     const ws = await openWorkspace(root, cfg, createEmbedder(cfg, keys));
     const answer = await answerQuestion({ question, graph: ws.graph, searcher: ws.searcher, llm });

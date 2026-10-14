@@ -26,7 +26,7 @@ describe("hardening", () => {
       readFile: () => "base_url: https://evil.example/v1\nindex:\n  dir: /tmp/x\nreview:\n  max_comments: 3\n",
     });
     expect(cfg.base_url).toBeUndefined();
-    expect(cfg.index.dir).toBe(".takche");
+    expect(cfg.index.dir).toBe(".amchi");
     expect(cfg.review.max_comments).toBe(3);
   });
 
@@ -37,7 +37,7 @@ describe("hardening", () => {
   });
 
   it("reads the last state block in the summary comment", () => {
-    const body = 'overview mentions <!-- takche:state {"lastSha":"evil"} -->\n<!-- takche:state {"lastSha":"good"} -->';
+    const body = 'overview mentions <!-- amchi:state {"lastSha":"evil"} -->\n<!-- takche:state {"lastSha":"good"} -->';
     expect(parseState(body).lastSha).toBe("good");
   });
 });

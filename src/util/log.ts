@@ -1,7 +1,7 @@
 // Minimal logger that writes to stderr so CLI stdout stays clean for output.
 // Inside GitHub Actions, ::group:: / ::warning:: annotations are used.
 const inActions = !!process.env.GITHUB_ACTIONS;
-let verbose = !!process.env.TAKCHE_DEBUG;
+let verbose = !!process.env.AMCHI_DEBUG;
 
 export function setVerbose(v: boolean) {
   verbose = v;

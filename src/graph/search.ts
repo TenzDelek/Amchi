@@ -61,7 +61,7 @@ export function buildChunks(graph: CodeGraph): Chunk[] {
 }
 
 // ---------------------------------------------------------------------------
-// Embedding cache: .takche/emb-<model>.bin + .json (hash -> row)
+// Embedding cache: .amchi/emb-<model>.bin + .json (hash -> row)
 // ---------------------------------------------------------------------------
 
 export class EmbeddingStore {

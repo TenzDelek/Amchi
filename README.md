@@ -1,4 +1,6 @@
-# Takche
+# Amchi
+
+*Amchi* (ཨམ་ཆི) is Tibetan for "doctor": it checks your pull requests before they ship.
 
 A self-hosted, Greptile-style AI code reviewer that runs as a **GitHub Action** with **your own** OpenAI, Claude or Gemini key. You pay only for the tokens you use. There's no per-seat fee and no per-review overage.
 
@@ -10,8 +12,8 @@ It builds a **code graph** of the whole repository (functions, classes, imports,
 - **PR summary comment** headed by a **Confidence Score (1–5)** and a risk label, followed by a numbered findings list that links to each inline comment, a **"Fix with agent prompt"** block covering every issue, a Mermaid sequence diagram and a per-file change table. It updates in place on every push.
 - **Incremental reviews.** New pushes only review the commits since the last review, and comments are never posted twice.
 - **Impact analysis from the graph:** callers of changed functions, removed functions that are still referenced, and deleted files that are still imported. The last check is deterministic, with no LLM involved.
-- **Chat.** Comment `@takche how is the session token validated?` on any PR or issue, or inside an inline thread, and it answers using the code graph with links to the code.
-- **Re-run on demand** with `@takche review`.
+- **Chat.** Comment `@amchi how is the session token validated?` on any PR or issue, or inside an inline thread, and it answers using the code graph with links to the code.
+- **Re-run on demand** with `@amchi review`.
 - **Team rules and instructions** per path glob, in `.codereview.yml`.
 - **Cost guards:** a per-run token budget, max files, max comments, skipping drafts, bots and labels, and token usage printed in every summary.
 - **Any provider:** Anthropic, OpenAI, Gemini, or any OpenAI-compatible endpoint (OpenRouter, Azure, DeepSeek, Groq, vLLM, Ollama).
@@ -22,7 +24,7 @@ It builds a **code graph** of the whole repository (functions, classes, imports,
 flowchart LR
   PR[PR opened / pushed] --> A[GitHub Action]
   A --> I[Indexer<br/>tree-sitter, 15 languages]
-  C[(actions/cache<br/>.takche)] <--> I
+  C[(actions/cache<br/>.amchi)] <--> I
   I --> G[Code graph<br/>symbols · calls · imports]
   I --> E[Embeddings<br/>optional, cached]
   A --> D[git diff merge-base..head]
@@ -34,7 +36,7 @@ flowchart LR
   V --> GH[Inline comments<br/>+ summary comment]
 ```
 
-1. **Index.** It parses every source file with tree-sitter (WASM, no native build) into symbols, call edges and resolved imports. The index is cached in `.takche/` through `actions/cache`, so later runs only re-parse changed files. Embeddings, if enabled, are cached by content hash and only computed for new code.
+1. **Index.** It parses every source file with tree-sitter (WASM, no native build) into symbols, call edges and resolved imports. The index is cached in `.amchi/` through `actions/cache`, so later runs only re-parse changed files. Embeddings, if enabled, are cached by content hash and only computed for new code.
 2. **Retrieve.** For each changed file it gathers the enclosing functions after the change, the definitions of functions the new code calls, callers of the changed functions, references to removed functions, importers and related tests, plus a hybrid (BM25 + embedding) search for similar code. Everything is packed into a token budget by priority.
 3. **Review.** It sends small files together and large files alone. The model returns structured JSON. Every finding is checked against the real diff lines GitHub will accept, deduplicated, filtered by severity and confidence, and capped.
 4. **Post.** Findings go out as one review with inline comments, and the summary comment is created or updated. Each comment carries a hidden fingerprint so re-runs never duplicate it.
@@ -45,11 +47,11 @@ For Dart, `package:<name>/…` imports resolve through the `name:` in `pubspec.y
 
 ## Setup
 
-**1. Publish the action.** Push this folder to a repo in your org, for example `your-org/takche`, and tag it:
+**1. Publish the action.** Push this folder to a repo in your org, for example `your-org/amchi`, and tag it:
 
 ```bash
-git init && git add -A && git commit -m "Takche v1"
-git remote add origin git@github.com:your-org/takche.git
+git init && git add -A && git commit -m "Amchi v1"
+git remote add origin git@github.com:your-org/amchi.git
 git push -u origin main
 git tag v1 && git push origin v1
 ```
@@ -117,7 +119,7 @@ node dist/cli.js ask "where do we validate JWTs?" --repo C:\code\my-app
 node dist/cli.js review --repo C:\code\my-app --base main --provider mock
 ```
 
-Set `TAKCHE_DUMP_PROMPTS=./prompts` to write every prompt and response to a folder. This is useful when tuning rules or debugging a bad comment.
+Set `AMCHI_DUMP_PROMPTS=./prompts` to write every prompt and response to a folder. This is useful when tuning rules or debugging a bad comment.
 
 ## Development
 
@@ -138,7 +140,7 @@ src/
   config.ts           .codereview.yml schema + defaults
   graph/              tree-sitter parser, indexer, import resolver, hybrid search
   review/             context builder, prompts, reviewer, markdown rendering
-  chat/               @takche question answering
+  chat/               @amchi question answering
   llm/                OpenAI / Anthropic / Gemini clients, retries, budget tracking, mock
   github/             Octokit wrapper (reviews, sticky summary, threads, reactions)
   git/                git helpers + unified diff parser
