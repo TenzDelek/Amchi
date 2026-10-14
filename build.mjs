@@ -51,6 +51,15 @@ for (const g of GRAMMARS) {
   else console.warn(`grammar not found, skipping: ${f}`);
 }
 
+// Grammars that ship in their own npm package (tree-sitter-wasms has no compatible build).
+for (const g of ["dart"]) {
+  try {
+    cpSync(require.resolve(`tree-sitter-${g}/tree-sitter-${g}.wasm`), join("dist/grammars", `tree-sitter-${g}.wasm`));
+  } catch {
+    console.warn(`grammar not found, skipping: tree-sitter-${g}`);
+  }
+}
+
 // Make the CLI executable and mark dist as ESM.
 writeFileSync("dist/package.json", JSON.stringify({ type: "module" }) + "\n");
 chmodSync("dist/cli.js", 0o755);

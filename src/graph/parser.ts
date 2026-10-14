@@ -62,6 +62,20 @@ function wasmPaths(): { runtime: string; grammarDir: string } {
   return { runtime: join(wtsDir, "tree-sitter.wasm"), grammarDir };
 }
 
+/**
+ * Grammars come from tree-sitter-wasms (copied to dist/grammars when bundled).
+ * Some, like Dart, ship in their own package instead.
+ */
+function grammarFile(grammarDir: string, grammar: string): string | null {
+  const file = join(grammarDir, `tree-sitter-${grammar}.wasm`);
+  if (existsSync(file)) return file;
+  try {
+    return require.resolve(`tree-sitter-${grammar}/tree-sitter-${grammar}.wasm`);
+  } catch {
+    return null;
+  }
+}
+
 async function getParser(lang: string): Promise<ParserT | null> {
   const spec = LANGS[lang];
   if (!spec) return null;
@@ -73,8 +87,8 @@ async function getParser(lang: string): Promise<ParserT | null> {
     ParserCls = P;
   }
   if (!languages.has(spec.grammar)) {
-    const file = join(grammarDir, `tree-sitter-${spec.grammar}.wasm`);
-    if (!existsSync(file)) {
+    const file = grammarFile(grammarDir, spec.grammar);
+    if (!file) {
       languages.set(spec.grammar, null);
     } else {
       try {
@@ -128,6 +142,18 @@ function defName(node: TSNode, lang: string): string | null {
     }
     return null;
   }
+  if (lang === "dart" && node.type.endsWith("constructor_signature")) {
+    // `A(..)`, `A.named(..)`, `const A.named(..)` -> the last identifier; the class is the parent.
+    const ids: string[] = [];
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i);
+      if (c.type === "identifier") ids.push(c.text);
+      else if (c.type === "qualified") {
+        for (let j = 0; j < c.namedChildCount; j++) if (c.namedChild(j).type === "identifier") ids.push(c.namedChild(j).text);
+      }
+    }
+    return ids[ids.length - 1] ?? null;
+  }
   if (node.type === "impl_item") {
     const t = node.childForFieldName("type");
     const tr = node.childForFieldName("trait");
@@ -150,8 +176,50 @@ function calleeName(node: TSNode): string | null {
   return node.namedChildCount ? rightmostIdent(node.namedChild(0)) : null;
 }
 
+function hasArgumentPart(node: TSNode): boolean {
+  for (let i = 0; i < node.namedChildCount; i++) if (node.namedChild(i).type === "argument_part") return true;
+  return false;
+}
+
+function memberName(selector: TSNode): string | null {
+  // selector > (unconditional|conditional)_assignable_selector > identifier
+  for (let i = 0; i < selector.namedChildCount; i++) {
+    const c = selector.namedChild(i);
+    if (c.type.endsWith("assignable_selector") || c.type === "cascade_selector") {
+      for (let j = 0; j < c.namedChildCount; j++) if (c.namedChild(j).type === "identifier") return c.namedChild(j).text;
+    }
+  }
+  return null;
+}
+
+/** Dart has no call node: `f(x)` is identifier + selector(argument_part); `a.f(x)` adds a member selector. */
+function dartCallee(node: TSNode): string | null {
+  switch (node.type) {
+    case "new_expression":
+    case "const_object_expression":
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i);
+        if (c.type === "type_identifier" || c.type === "identifier") return rightmostIdent(c);
+      }
+      return null;
+    case "cascade_section":
+      return hasArgumentPart(node) ? memberName(node) : null;
+    case "selector": {
+      if (!hasArgumentPart(node)) return null;
+      const prev = node.previousNamedSibling;
+      if (!prev) return null;
+      if (prev.type === "identifier") return prev.text;
+      if (prev.type === "selector") return hasArgumentPart(prev) ? null : memberName(prev);
+      if (prev.type.endsWith("assignable_selector")) return memberName({ namedChildCount: 1, namedChild: () => prev } as TSNode);
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
 function firstString(node: TSNode, depth = 0): string | null {
-  if (!node || depth > 5) return null;
+  if (!node || depth > 7) return null;
   if (STRING_TYPES.has(node.type)) return node.text.replace(/^[@rbuf]*["'`<]+|["'`>]+$/gi, "");
   for (let i = 0; i < node.namedChildCount; i++) {
     const r = firstString(node.namedChild(i), depth + 1);
@@ -206,6 +274,9 @@ function importSpecs(node: TSNode, lang: string): string[] {
       const a = node.childForFieldName("argument");
       return a ? [a.text] : [];
     }
+    case "import_or_export":
+    case "part_directive":
+      return [firstString(node)].filter(Boolean) as string[];
     case "import_declaration":
     case "import_header":
     case "using_directive":
@@ -228,7 +299,15 @@ function signatureOf(node: TSNode): string {
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
 }
 
-const CONTAINER_KINDS = new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol"]);
+const CONTAINER_KINDS = new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol", "mixin", "extension"]);
+
+/** Dart: a *_signature's body is the next sibling function_body (possibly of a wrapping node). */
+function dartBodyOf(sig: TSNode): TSNode | null {
+  let holder = sig;
+  while (holder.parent && ["method_signature", "declaration", "lambda_expression"].includes(holder.parent.type)) holder = holder.parent;
+  const next = holder.nextNamedSibling;
+  return next && next.type === "function_body" ? next : null;
+}
 
 export async function parseSource(content: string, lang: string): Promise<ParsedFile | null> {
   const spec: LangSpec | undefined = LANGS[lang];
@@ -251,13 +330,17 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
   const imports = new Set<string>();
   const topCalls = new Set<string>();
   const symbolCalls = new Map<SymbolInfo, Set<string>>();
+  /** Dart: node id of a function_body -> the symbol whose signature precedes it. */
+  const bodyOwner = new Map<number, SymbolInfo>();
 
   // Iterative DFS with a stack of enclosing symbols.
   type Frame = { node: TSNode; owner: SymbolInfo | null; container: string | undefined };
   const stack: Frame[] = [{ node: tree.rootNode, owner: null, container: undefined }];
   let visited = 0;
   while (stack.length) {
-    const { node, owner, container } = stack.pop()!;
+    const frame = stack.pop()!;
+    const { node, container } = frame;
+    const owner = bodyOwner.get(node.id) ?? frame.owner;
     if (++visited > 400_000) break; // pathological files
 
     let nextOwner = owner;
@@ -272,7 +355,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
       const name = accept ? defName(node, lang) : null;
       if (name) {
         let k = kind;
-        if (k === "function" && container && (lang === "rust" || lang === "python" || lang === "kotlin" || lang === "scala" || lang === "swift" || lang === "php" || lang === "cpp")) {
+        if (k === "function" && container && (lang === "rust" || lang === "python" || lang === "kotlin" || lang === "scala" || lang === "swift" || lang === "php" || lang === "cpp" || lang === "dart")) {
           k = "method";
         }
         const sym: SymbolInfo = {
@@ -284,6 +367,19 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
           signature: signatureOf(node),
           calls: [],
         };
+        if (lang === "dart" && node.type.endsWith("_signature")) {
+          // `A() : x = f() { ... }` -> the initializer list and the body both belong to the constructor.
+          const init = node.nextNamedSibling;
+          if (init && init.type === "initializers") {
+            sym.end = init.endPosition.row + 1;
+            bodyOwner.set(init.id, sym);
+          }
+          const body = dartBodyOf(node);
+          if (body) {
+            sym.end = body.endPosition.row + 1;
+            bodyOwner.set(body.id, sym);
+          }
+        }
         symbols.push(sym);
         symbolCalls.set(sym, new Set());
         nextOwner = sym;
@@ -292,7 +388,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
     }
 
     if (callTypes.has(node.type)) {
-      const callee = calleeName(node);
+      const callee = lang === "dart" ? dartCallee(node) : calleeName(node);
       if (callee) {
         if ((callee === "require" || callee === "require_relative" || callee === "import") && node.namedChildCount) {
           const s = firstString(node.childForFieldName("arguments") ?? node);

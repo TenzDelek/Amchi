@@ -11719,6 +11719,27 @@ var LANGS = {
     defs: {},
     calls: ["call"],
     imports: []
+  },
+  // Dart (Flutter). The grammar splits a function into a *_signature node and a
+  // sibling function_body, and has no call node: a call is a `selector` holding
+  // an argument_part. parser.ts has the Dart-specific glue for both.
+  dart: {
+    grammar: "dart",
+    defs: {
+      class_definition: "class",
+      mixin_declaration: "mixin",
+      extension_declaration: "extension",
+      enum_declaration: "enum",
+      type_alias: "type",
+      function_signature: "function",
+      getter_signature: "method",
+      setter_signature: "method",
+      constructor_signature: "constructor",
+      factory_constructor_signature: "constructor",
+      constant_constructor_signature: "constructor"
+    },
+    calls: ["selector", "cascade_section", "new_expression", "const_object_expression"],
+    imports: ["import_or_export", "part_directive"]
   }
 };
 var EXT_TO_LANG = {
@@ -11752,7 +11773,8 @@ var EXT_TO_LANG = {
   sc: "scala",
   lua: "lua",
   ex: "elixir",
-  exs: "elixir"
+  exs: "elixir",
+  dart: "dart"
 };
 var TEXT_EXTS = /* @__PURE__ */ new Set([
   "md",
@@ -11793,7 +11815,6 @@ var TEXT_EXTS = /* @__PURE__ */ new Set([
   "rake",
   "gradle",
   "properties",
-  "dart",
   "r",
   "jl",
   "m",
@@ -11865,6 +11886,15 @@ function wasmPaths() {
   const grammarDir = join2(dirname(require2.resolve("tree-sitter-wasms/package.json")), "out");
   return { runtime: join2(wtsDir, "tree-sitter.wasm"), grammarDir };
 }
+function grammarFile(grammarDir, grammar) {
+  const file = join2(grammarDir, `tree-sitter-${grammar}.wasm`);
+  if (existsSync2(file)) return file;
+  try {
+    return require2.resolve(`tree-sitter-${grammar}/tree-sitter-${grammar}.wasm`);
+  } catch {
+    return null;
+  }
+}
 async function getParser(lang) {
   const spec = LANGS[lang];
   if (!spec) return null;
@@ -11875,8 +11905,8 @@ async function getParser(lang) {
     ParserCls = P;
   }
   if (!languages.has(spec.grammar)) {
-    const file = join2(grammarDir, `tree-sitter-${spec.grammar}.wasm`);
-    if (!existsSync2(file)) {
+    const file = grammarFile(grammarDir, spec.grammar);
+    if (!file) {
       languages.set(spec.grammar, null);
     } else {
       try {
@@ -11926,6 +11956,17 @@ function defName(node, lang) {
     }
     return null;
   }
+  if (lang === "dart" && node.type.endsWith("constructor_signature")) {
+    const ids = [];
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const c = node.namedChild(i);
+      if (c.type === "identifier") ids.push(c.text);
+      else if (c.type === "qualified") {
+        for (let j = 0; j < c.namedChildCount; j++) if (c.namedChild(j).type === "identifier") ids.push(c.namedChild(j).text);
+      }
+    }
+    return ids[ids.length - 1] ?? null;
+  }
   if (node.type === "impl_item") {
     const t = node.childForFieldName("type");
     const tr = node.childForFieldName("trait");
@@ -11946,8 +11987,45 @@ function calleeName(node) {
   }
   return node.namedChildCount ? rightmostIdent(node.namedChild(0)) : null;
 }
+function hasArgumentPart(node) {
+  for (let i = 0; i < node.namedChildCount; i++) if (node.namedChild(i).type === "argument_part") return true;
+  return false;
+}
+function memberName(selector) {
+  for (let i = 0; i < selector.namedChildCount; i++) {
+    const c = selector.namedChild(i);
+    if (c.type.endsWith("assignable_selector") || c.type === "cascade_selector") {
+      for (let j = 0; j < c.namedChildCount; j++) if (c.namedChild(j).type === "identifier") return c.namedChild(j).text;
+    }
+  }
+  return null;
+}
+function dartCallee(node) {
+  switch (node.type) {
+    case "new_expression":
+    case "const_object_expression":
+      for (let i = 0; i < node.namedChildCount; i++) {
+        const c = node.namedChild(i);
+        if (c.type === "type_identifier" || c.type === "identifier") return rightmostIdent(c);
+      }
+      return null;
+    case "cascade_section":
+      return hasArgumentPart(node) ? memberName(node) : null;
+    case "selector": {
+      if (!hasArgumentPart(node)) return null;
+      const prev = node.previousNamedSibling;
+      if (!prev) return null;
+      if (prev.type === "identifier") return prev.text;
+      if (prev.type === "selector") return hasArgumentPart(prev) ? null : memberName(prev);
+      if (prev.type.endsWith("assignable_selector")) return memberName({ namedChildCount: 1, namedChild: () => prev });
+      return null;
+    }
+    default:
+      return null;
+  }
+}
 function firstString(node, depth = 0) {
-  if (!node || depth > 5) return null;
+  if (!node || depth > 7) return null;
   if (STRING_TYPES.has(node.type)) return node.text.replace(/^[@rbuf]*["'`<]+|["'`>]+$/gi, "");
   for (let i = 0; i < node.namedChildCount; i++) {
     const r = firstString(node.namedChild(i), depth + 1);
@@ -12000,6 +12078,9 @@ function importSpecs(node, lang) {
       const a = node.childForFieldName("argument");
       return a ? [a.text] : [];
     }
+    case "import_or_export":
+    case "part_directive":
+      return [firstString(node)].filter(Boolean);
     case "import_declaration":
     case "import_header":
     case "using_directive":
@@ -12016,7 +12097,13 @@ function signatureOf(node) {
   const first = text.split("\n")[0].trim();
   return first.length > 200 ? `${first.slice(0, 200)}\u2026` : first;
 }
-var CONTAINER_KINDS = /* @__PURE__ */ new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol"]);
+var CONTAINER_KINDS = /* @__PURE__ */ new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol", "mixin", "extension"]);
+function dartBodyOf(sig) {
+  let holder = sig;
+  while (holder.parent && ["method_signature", "declaration", "lambda_expression"].includes(holder.parent.type)) holder = holder.parent;
+  const next = holder.nextNamedSibling;
+  return next && next.type === "function_body" ? next : null;
+}
 async function parseSource(content, lang) {
   const spec = LANGS[lang];
   if (!spec) return null;
@@ -12036,10 +12123,13 @@ async function parseSource(content, lang) {
   const imports = /* @__PURE__ */ new Set();
   const topCalls = /* @__PURE__ */ new Set();
   const symbolCalls = /* @__PURE__ */ new Map();
+  const bodyOwner = /* @__PURE__ */ new Map();
   const stack = [{ node: tree.rootNode, owner: null, container: void 0 }];
   let visited = 0;
   while (stack.length) {
-    const { node, owner, container } = stack.pop();
+    const frame = stack.pop();
+    const { node, container } = frame;
+    const owner = bodyOwner.get(node.id) ?? frame.owner;
     if (++visited > 4e5) break;
     let nextOwner = owner;
     let nextContainer = container;
@@ -12053,7 +12143,7 @@ async function parseSource(content, lang) {
       const name = accept ? defName(node, lang) : null;
       if (name) {
         let k = kind;
-        if (k === "function" && container && (lang === "rust" || lang === "python" || lang === "kotlin" || lang === "scala" || lang === "swift" || lang === "php" || lang === "cpp")) {
+        if (k === "function" && container && (lang === "rust" || lang === "python" || lang === "kotlin" || lang === "scala" || lang === "swift" || lang === "php" || lang === "cpp" || lang === "dart")) {
           k = "method";
         }
         const sym = {
@@ -12065,6 +12155,18 @@ async function parseSource(content, lang) {
           signature: signatureOf(node),
           calls: []
         };
+        if (lang === "dart" && node.type.endsWith("_signature")) {
+          const init2 = node.nextNamedSibling;
+          if (init2 && init2.type === "initializers") {
+            sym.end = init2.endPosition.row + 1;
+            bodyOwner.set(init2.id, sym);
+          }
+          const body2 = dartBodyOf(node);
+          if (body2) {
+            sym.end = body2.endPosition.row + 1;
+            bodyOwner.set(body2.id, sym);
+          }
+        }
         symbols.push(sym);
         symbolCalls.set(sym, /* @__PURE__ */ new Set());
         nextOwner = sym;
@@ -12072,7 +12174,7 @@ async function parseSource(content, lang) {
       }
     }
     if (callTypes.has(node.type)) {
-      const callee = calleeName(node);
+      const callee = lang === "dart" ? dartCallee(node) : calleeName(node);
       if (callee) {
         if ((callee === "require" || callee === "require_relative" || callee === "import") && node.namedChildCount) {
           const s = firstString(node.childForFieldName("arguments") ?? node);
@@ -12209,11 +12311,15 @@ async function buildIndex(root, cfg, prev, commit) {
     parsed++;
   }
   let goModule;
+  let dartPackage;
+  if (existsSync3(join3(root, "pubspec.yaml"))) {
+    dartPackage = readFileSync2(join3(root, "pubspec.yaml"), "utf8").match(/^name:\s*["']?([\w-]+)/m)?.[1];
+  }
   try {
     goModule = readFileSync2(join3(root, "go.mod"), "utf8").match(/^module\s+(\S+)/m)?.[1];
   } catch {
   }
-  const resolver = new ImportResolver(Object.keys(files), goModule);
+  const resolver = new ImportResolver(Object.keys(files), goModule, dartPackage);
   for (const f of Object.values(files)) {
     f.resolved = [...new Set(f.imports.map((i) => resolver.resolve(f.path, i, f.lang)).filter(Boolean))];
   }
@@ -12230,8 +12336,9 @@ function stripExt(p) {
   return p.replace(/\.[^./]+$/, "");
 }
 var ImportResolver = class {
-  constructor(paths, goModule) {
+  constructor(paths, goModule, dartPackage) {
     this.goModule = goModule;
+    this.dartPackage = dartPackage;
     this.set = new Set(paths);
     for (const p of paths) {
       const stem = stripExt(posix.basename(p));
@@ -12241,6 +12348,7 @@ var ImportResolver = class {
     }
   }
   goModule;
+  dartPackage;
   set;
   /** basename without extension -> paths */
   byStem = /* @__PURE__ */ new Map();
@@ -12347,6 +12455,16 @@ var ImportResolver = class {
         return this.bySuffix(spec.replace(/\\/g, "/"), [".php"]);
       case "ruby":
         return spec.startsWith(".") ? this.tryFile(posix.join(dir, spec), [".rb"], []) : this.bySuffix(spec, [".rb"]);
+      case "dart": {
+        if (spec.startsWith("dart:")) return null;
+        const pkg = spec.match(/^package:([^/]+)\/(.+)$/);
+        if (pkg) {
+          const [, name, rest] = pkg;
+          if (name === this.dartPackage) return this.tryFile(`lib/${rest}`, [".dart"], []);
+          return this.bySuffix(`${name}/lib/${rest}`, [".dart"]);
+        }
+        return this.tryFile(posix.join(dir, spec), [".dart"], []);
+      }
       case "swift":
       default:
         return null;

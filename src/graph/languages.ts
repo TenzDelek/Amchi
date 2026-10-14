@@ -164,6 +164,27 @@ export const LANGS: Record<string, LangSpec> = {
     calls: ["call"],
     imports: [],
   },
+  // Dart (Flutter). The grammar splits a function into a *_signature node and a
+  // sibling function_body, and has no call node: a call is a `selector` holding
+  // an argument_part. parser.ts has the Dart-specific glue for both.
+  dart: {
+    grammar: "dart",
+    defs: {
+      class_definition: "class",
+      mixin_declaration: "mixin",
+      extension_declaration: "extension",
+      enum_declaration: "enum",
+      type_alias: "type",
+      function_signature: "function",
+      getter_signature: "method",
+      setter_signature: "method",
+      constructor_signature: "constructor",
+      factory_constructor_signature: "constructor",
+      constant_constructor_signature: "constructor",
+    },
+    calls: ["selector", "cascade_section", "new_expression", "const_object_expression"],
+    imports: ["import_or_export", "part_directive"],
+  },
 };
 
 const EXT_TO_LANG: Record<string, string> = {
@@ -183,6 +204,7 @@ const EXT_TO_LANG: Record<string, string> = {
   scala: "scala", sc: "scala",
   lua: "lua",
   ex: "elixir", exs: "elixir",
+  dart: "dart",
 };
 
 /** Plain-text files we index for search (no AST) because they often matter in reviews. */
@@ -190,7 +212,7 @@ const TEXT_EXTS = new Set([
   "md", "mdx", "txt", "rst", "json", "yml", "yaml", "toml", "ini", "cfg", "conf", "env",
   "sql", "graphql", "gql", "proto", "prisma", "sh", "bash", "zsh", "ps1", "dockerfile",
   "html", "htm", "css", "scss", "sass", "less", "vue", "svelte", "astro", "tf", "hcl",
-  "xml", "rb", "rake", "gradle", "properties", "dart", "r", "jl", "m", "mm", "pl", "clj", "erl", "hs", "ml", "zig", "nim",
+  "xml", "rb", "rake", "gradle", "properties", "r", "jl", "m", "mm", "pl", "clj", "erl", "hs", "ml", "zig", "nim",
 ]);
 
 export function langForPath(path: string): string | null {

@@ -25,6 +25,62 @@ describe("language coverage", () => {
       for (const c of calls) expect([...allCalls], `${lang} calls`).toContain(c);
     });
   }
+  it("dart: classes, methods, constructors, selector calls, imports and body ranges", async () => {
+    const src = `import 'package:flutter/material.dart';
+import '../providers/prayer_requests_providers.dart' as prov;
+part 'bar.g.dart';
+
+enum PrayerSort { newest, oldest }
+mixin Loggable { void log(String m) => print(m); }
+extension IntX on int { int doubled() => this * 2; }
+abstract class Repo { Future<List<int>> fetch(); }
+
+class PrayerRequestsNotifier extends StateNotifier<int> with Loggable {
+  final Repo repo;
+  PrayerRequestsNotifier(this.repo) : super(0);
+  PrayerRequestsNotifier.named() : repo = FakeRepo(), super(1);
+  factory PrayerRequestsNotifier.create() => PrayerRequestsNotifier(FakeRepo());
+
+  Future<void> refreshLatest() async {
+    final items = await repo.fetch();
+    _shiftCount(1);
+    list..add(1)..clear();
+    items.map((e) => e * 2).toList();
+  }
+  void _shiftCount(int n) { state += n; }
+  int get count => state;
+}
+
+void main() { runApp(const MyApp()); }
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) => MaterialApp(home: Scaffold(body: Text('hi')));
+}
+`;
+    const p = (await parseSource(src, "dart"))!;
+    expect(p).toBeTruthy();
+    const by = Object.fromEntries(p.symbols.map((s) => [`${s.parent ?? ""}.${s.name}`, s]));
+    expect(by[".PrayerSort"].kind).toBe("enum");
+    expect(by[".Loggable"].kind).toBe("mixin");
+    expect(by["Loggable.log"].kind).toBe("method");
+    expect(by["IntX.doubled"].kind).toBe("method");
+    expect(by["Repo.fetch"].kind).toBe("method");
+    expect(by["PrayerRequestsNotifier.PrayerRequestsNotifier"].kind).toBe("constructor");
+    expect(by["PrayerRequestsNotifier.named"].kind).toBe("constructor");
+    expect(by["PrayerRequestsNotifier.create"].kind).toBe("constructor");
+    expect(by["MyApp.MyApp"].kind).toBe("constructor");
+    expect(by[".main"].kind).toBe("function");
+    expect(by["MyApp.build"].calls).toEqual(["MaterialApp", "Scaffold", "Text"]);
+    // The body is a sibling of the signature: the symbol must span it and own its calls.
+    const r = by["PrayerRequestsNotifier.refreshLatest"];
+    expect(r.end - r.start).toBeGreaterThanOrEqual(5);
+    expect(r.calls).toEqual(expect.arrayContaining(["fetch", "_shiftCount", "add", "clear", "map", "toList"]));
+    expect(by["PrayerRequestsNotifier.named"].calls).toContain("FakeRepo");
+    expect(by[".main"].calls).toEqual(expect.arrayContaining(["runApp", "MyApp"]));
+    expect(p.imports).toEqual(["package:flutter/material.dart", "../providers/prayer_requests_providers.dart", "bar.g.dart"]);
+  });
+
   it("parses elixir without crashing", async () => {
     const p = await parseSource("defmodule A do\n  def run, do: Store.save(1)\nend", "elixir");
     expect(p).toBeTruthy();

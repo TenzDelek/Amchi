@@ -170,12 +170,16 @@ export async function buildIndex(
   }
 
   let goModule: string | undefined;
+  let dartPackage: string | undefined;
+  if (existsSync(join(root, "pubspec.yaml"))) {
+    dartPackage = readFileSync(join(root, "pubspec.yaml"), "utf8").match(/^name:\s*["']?([\w-]+)/m)?.[1];
+  }
   try {
     goModule = readFileSync(join(root, "go.mod"), "utf8").match(/^module\s+(\S+)/m)?.[1];
   } catch {
     /* not a Go module */
   }
-  const resolver = new ImportResolver(Object.keys(files), goModule);
+  const resolver = new ImportResolver(Object.keys(files), goModule, dartPackage);
   for (const f of Object.values(files)) {
     f.resolved = [...new Set(f.imports.map((i) => resolver.resolve(f.path, i, f.lang)).filter(Boolean) as string[])];
   }
@@ -209,6 +213,8 @@ export class ImportResolver {
   constructor(
     paths: string[],
     private goModule?: string,
+    /** `name:` from pubspec.yaml, so `package:<name>/x.dart` resolves to lib/x.dart. */
+    private dartPackage?: string,
   ) {
     this.set = new Set(paths);
     for (const p of paths) {
@@ -338,6 +344,17 @@ export class ImportResolver {
         return spec.startsWith(".")
           ? this.tryFile(posix.join(dir, spec), [".rb"], [])
           : this.bySuffix(spec, [".rb"]);
+      case "dart": {
+        if (spec.startsWith("dart:")) return null;
+        const pkg = spec.match(/^package:([^/]+)\/(.+)$/);
+        if (pkg) {
+          const [, name, rest] = pkg;
+          if (name === this.dartPackage) return this.tryFile(`lib/${rest}`, [".dart"], []);
+          // monorepo: packages/<name>/lib/<rest>.dart
+          return this.bySuffix(`${name}/lib/${rest}`, [".dart"]);
+        }
+        return this.tryFile(posix.join(dir, spec), [".dart"], []);
+      }
       case "swift":
       default:
         return null;

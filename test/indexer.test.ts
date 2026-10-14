@@ -70,3 +70,30 @@ describe("indexer", () => {
     expect(hits[0].chunk.path).toBe("pkg/util/strings.py");
   });
 });
+
+describe("indexer: dart / flutter", () => {
+  const repo = new TempRepo();
+  afterAll(() => repo.cleanup());
+  repo.write({
+    "pubspec.yaml": "name: prayer_app\ndescription: demo\n",
+    "lib/main.dart": "import 'package:flutter/material.dart';\nimport 'package:prayer_app/features/store.dart';\nimport 'widgets/home.dart';\n\nvoid main() { runApp(const Home()); loadAll(); }\n",
+    "lib/features/store.dart": "Future<void> loadAll() async {}\n",
+    "lib/widgets/home.dart": "import '../features/store.dart';\nclass Home { void init() { loadAll(); } }\n",
+    "packages/shared/lib/util.dart": "int twice(int x) => x * 2;\n",
+    "lib/uses_shared.dart": "import 'package:shared/util.dart';\nint four() => twice(2);\n",
+    "test/store_test.dart": "import 'package:prayer_app/features/store.dart';\n",
+  });
+  repo.commit("init");
+
+  it("resolves package:, relative and monorepo imports and tracks callers", async () => {
+    const { data } = await buildIndex(repo.dir, loadConfig(repo.dir), null);
+    expect(data.files["lib/main.dart"].lang).toBe("dart");
+    expect(data.files["lib/main.dart"].resolved.sort()).toEqual(["lib/features/store.dart", "lib/widgets/home.dart"]);
+    expect(data.files["lib/widgets/home.dart"].resolved).toEqual(["lib/features/store.dart"]);
+    expect(data.files["lib/uses_shared.dart"].resolved).toEqual(["packages/shared/lib/util.dart"]);
+    const g = new CodeGraph(repo.dir, data);
+    expect(g.definitionsOf("loadAll").map((d) => d.path)).toEqual(["lib/features/store.dart"]);
+    expect(g.callersOf("loadAll").map((c) => `${c.path}:${c.symbol.name}`).sort()).toEqual(["lib/main.dart:main", "lib/widgets/home.dart:init"]);
+    expect(g.testsFor("lib/features/store.dart")).toEqual(["test/store_test.dart"]);
+  });
+});
