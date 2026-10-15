@@ -4,18 +4,30 @@ import type { Embedder } from "../llm/types.js";
 import { log } from "../util/log.js";
 import { lineSlice, mapLimit, sha1, tokenize } from "../util/text.js";
 import type { CodeGraph } from "./indexer.js";
-import { CONTAINER_KINDS } from "./parser.js";
+import { CONTAINER_KINDS, type SymbolInfo } from "./parser.js";
 
-export interface Chunk {
-  id: string;
-  path: string;
+/**
+ * A searchable span of one file, computed when the file is parsed and stored in
+ * the index, so search never has to read unchanged files again. The text itself
+ * is not stored: `chunkText` regenerates it from the file on demand.
+ */
+export interface ChunkMeta {
   start: number;
   end: number;
   /** Symbol name when the chunk is a definition. */
   name?: string;
   kind?: string;
-  text: string;
+  /** sha1 of the chunk text; the key of the embedding cache. */
   hash: string;
+  /** Number of search terms in the chunk (BM25 document length). */
+  len: number;
+  /** Term frequencies over path, name and text. */
+  tf: Record<string, number>;
+}
+
+export interface Chunk extends ChunkMeta {
+  id: string;
+  path: string;
 }
 
 export interface SearchHit {
@@ -26,38 +38,63 @@ export interface SearchHit {
 const MAX_CHUNK_LINES = 120;
 const WINDOW = 60;
 
-/** Split the repo into searchable chunks: one per definition, or line windows for files without symbols. */
+/** The line spans a file is split into: one per definition, or line windows for files without symbols. */
+export function chunkSpans(symbols: SymbolInfo[], lines: number): { start: number; end: number; name?: string; kind?: string }[] {
+  const spans: { start: number; end: number; name?: string; kind?: string }[] = [];
+  if (symbols.length) {
+    for (const s of symbols) {
+      const len = s.end - s.start + 1;
+      if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
+        spans.push({ start: s.start, end: s.start + 25, name: s.name, kind: s.kind }); // header of big classes
+      } else {
+        spans.push({ start: s.start, end: Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), name: s.name, kind: s.kind });
+      }
+    }
+    // Module-level code before the first symbol (imports, constants, config)
+    const first = Math.min(...symbols.map((s) => s.start));
+    if (first > 3) spans.push({ start: 1, end: Math.min(first - 1, WINDOW) });
+  } else {
+    for (let start = 1, n = 0; start <= lines && n < 10; start += WINDOW, n++) {
+      spans.push({ start, end: Math.min(lines, start + WINDOW - 1) });
+    }
+  }
+  return spans;
+}
+
+/** The text that is embedded and hashed: a one-line header, then the code. */
+export function chunkText(path: string, content: string, c: { start: number; end: number; name?: string; kind?: string }): string | null {
+  const code = lineSlice(content, c.start, c.end);
+  if (!code.trim()) return null;
+  return `${path}:${c.start}-${c.end}${c.name ? ` ${c.kind} ${c.name}` : ""}\n${code}`;
+}
+
+/** Compute a file's chunks from its content, at index time. */
+export function chunkFile(path: string, content: string, lines: number, symbols: SymbolInfo[]): ChunkMeta[] {
+  const out: ChunkMeta[] = [];
+  for (const span of chunkSpans(symbols, lines)) {
+    const text = chunkText(path, content, span);
+    if (text == null) continue;
+    const terms = tokenize(`${path} ${span.name ?? ""} ${text}`);
+    const tf: Record<string, number> = {};
+    for (const t of terms) tf[t] = (tf[t] ?? 0) + 1;
+    out.push({ ...span, hash: sha1(text), len: terms.length, tf });
+  }
+  return out;
+}
+
+/** All chunks of the repository, straight from the index (no file is read). */
 export function buildChunks(graph: CodeGraph): Chunk[] {
   const chunks: Chunk[] = [];
   for (const f of Object.values(graph.data.files)) {
-    const content = graph.read(f.path);
-    if (content == null) continue;
-    const add = (start: number, end: number, name?: string, kind?: string) => {
-      const code = lineSlice(content, start, end);
-      if (!code.trim()) return;
-      const header = `${f.path}:${start}-${end}${name ? ` ${kind} ${name}` : ""}`;
-      const text = `${header}\n${code}`;
-      chunks.push({ id: `${f.path}:${start}-${end}`, path: f.path, start, end, name, kind, text, hash: sha1(text) });
-    };
-    if (f.symbols.length) {
-      for (const s of f.symbols) {
-        const len = s.end - s.start + 1;
-        if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
-          add(s.start, s.start + 25, s.name, s.kind); // header of big classes
-        } else {
-          add(s.start, Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), s.name, s.kind);
-        }
-      }
-      // Module-level code before the first symbol (imports, constants, config)
-      const first = Math.min(...f.symbols.map((s) => s.start));
-      if (first > 3) add(1, Math.min(first - 1, WINDOW));
-    } else {
-      for (let start = 1, n = 0; start <= f.lines && n < 10; start += WINDOW, n++) {
-        add(start, Math.min(f.lines, start + WINDOW - 1));
-      }
-    }
+    for (const c of f.chunks ?? []) chunks.push({ ...c, id: `${f.path}:${c.start}-${c.end}`, path: f.path });
   }
   return chunks;
+}
+
+/** Read a chunk's text from the working tree (for embedding). */
+export function readChunkText(graph: CodeGraph, c: Chunk): string | null {
+  const content = graph.read(c.path);
+  return content == null ? null : chunkText(c.path, content, c);
 }
 
 // ---------------------------------------------------------------------------
@@ -108,22 +145,27 @@ export class EmbeddingStore {
 // Hybrid search: BM25 over identifiers + cosine over embeddings, fused with RRF
 // ---------------------------------------------------------------------------
 
+export interface SearcherOptions {
+  /** How to get a chunk's text when it must be embedded. Defaults to "unavailable". */
+  textOf?: (c: Chunk) => string | null;
+}
+
 export class Searcher {
   private postings = new Map<string, { doc: number; tf: number }[]>();
   private docLen: number[] = [];
   private avgLen = 1;
+  private textOf: (c: Chunk) => string | null;
 
   constructor(
     readonly chunks: Chunk[],
     private embedder: Embedder | null = null,
     private store: EmbeddingStore | null = null,
+    opts: SearcherOptions = {},
   ) {
+    this.textOf = opts.textOf ?? (() => null);
     chunks.forEach((c, i) => {
-      const terms = tokenize(`${c.path} ${c.name ?? ""} ${c.text}`);
-      this.docLen[i] = terms.length;
-      const tf = new Map<string, number>();
-      for (const t of terms) tf.set(t, (tf.get(t) ?? 0) + 1);
-      for (const [t, n] of tf) (this.postings.get(t) ?? this.postings.set(t, []).get(t)!).push({ doc: i, tf: n });
+      this.docLen[i] = c.len;
+      for (const [t, n] of Object.entries(c.tf)) (this.postings.get(t) ?? this.postings.set(t, []).get(t)!).push({ doc: i, tf: n });
     });
     this.avgLen = this.docLen.reduce((a, b) => a + b, 0) / Math.max(1, chunks.length);
   }
@@ -135,18 +177,24 @@ export class Searcher {
   /** Embed chunks that are not cached yet. Returns number of new embeddings. */
   async ensureEmbeddings(maxChunks: number): Promise<number> {
     if (!this.embedder || !this.store) return 0;
-    const missing = this.chunks.filter((c) => !this.store!.vectors.has(c.hash)).slice(0, maxChunks);
+    const missing: { chunk: Chunk; text: string }[] = [];
+    for (const c of this.chunks) {
+      if (missing.length >= maxChunks) break;
+      if (this.store.vectors.has(c.hash)) continue;
+      const text = this.textOf(c);
+      if (text != null) missing.push({ chunk: c, text });
+    }
     if (!missing.length) return 0;
     log.info(`Embedding ${missing.length} new code chunks with ${this.embedder.model}…`);
     const bs = this.embedder.batchSize;
-    const batches: Chunk[][] = [];
+    const batches: { chunk: Chunk; text: string }[][] = [];
     for (let i = 0; i < missing.length; i += bs) batches.push(missing.slice(i, i + bs));
     let done = 0;
     try {
       await mapLimit(batches, 3, async (batch) => {
-        const vecs = await this.embedder!.embed(batch.map((c) => c.text));
+        const vecs = await this.embedder!.embed(batch.map((m) => m.text));
         vecs.forEach((v, i) => {
-          this.store!.vectors.set(batch[i].hash, Float32Array.from(normalize(v)));
+          this.store!.vectors.set(batch[i].chunk.hash, Float32Array.from(normalize(v)));
           this.store!.dims = v.length;
         });
         done += batch.length;
@@ -178,7 +226,7 @@ export class Searcher {
     }
     return [...scores.entries()]
       .filter(([d]) => !filter || filter(this.chunks[d]))
-      .sort((a, b) => b[1] - a[1])
+      .sort((x, y) => y[1] - x[1])
       .slice(0, k)
       .map(([d, s]) => ({ chunk: this.chunks[d], score: s }));
   }

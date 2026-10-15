@@ -5,7 +5,9 @@ Impact: how much it slows work (1–5). Risk: what happens if left alone (1–5)
 Effort: 1 under an hour, 2 half a day, 3 up to two days, 4 up to a week, 5 more.
 
 Re-score when an item is fixed or its trigger fires; delete rows rather than letting them go stale.
-Phase 1 was completed on 2026-10-15; items 2, 3, 4, 5 and 12 are closed and kept in the table only until the next re-score.
+All three phases were worked on 2026-10-15. Closed: 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13. Item 8 is decided
+in ADR-005 (stay pinned; the upgrade path is an in-house grammar build). Rows stay in the table until the next
+re-score so the reasoning is still visible.
 
 ## Prioritised list
 
@@ -48,14 +50,14 @@ Each phase fits alongside feature work; nothing here blocks a release.
 
 ### Phase 2: structure and safety net (one focused week)
 
-6. [ ] Split `reviewPullRequest` into `selectFiles`, `planBatches` (exists), `reviewBatch`, `resolveFindings`, `summarize`, and `index.ts`'s `reviewPr` into `loadState`, `postFindings`, `writeSummary` (item 7). Pure functions in, typed results out; the funnel becomes a by-product.
-7. [ ] Test the action orchestration (item 1) with a fake `GitHubClient`: skip rules, incremental delta with a merge from main, dedupe against earlier comments including retitled findings, `lastSha` retained on partial runs, `pending` scheduled first.
-8. [ ] Add a release workflow (item 6): on a `v*.*.*` tag, run CI, verify `dist/` matches, create the GitHub release from the matching `CHANGELOG.md` section, and move the `v2` major tag.
-9. [ ] Add a linter with a minimal rule set and run it in CI (item 9); keep the `any` in `parser.ts` behind one documented cast.
+6. [x] Split `reviewPullRequest` into `selectFiles`, `deletedImportFindings`, `planBatches`, `reviewBatch`, `resolveFindings` and `summarize` (item 7); moved `reviewPr` into `src/action/review-pr.ts` behind a `PrPort` and a `Reporter` so it runs without GitHub or `@actions/core`.
+7. [x] Test the action orchestration (item 1) with a fake port (`test/action.test.ts`): skip rules, first run, same-commit no-op, forced re-run, incremental push, partial run with `pending`, refused comments, request-changes and fail-on.
+8. [x] Add a release workflow (item 6): `.github/workflows/release.yml` runs on a `v*.*.*` tag, verifies `dist/`, creates the release from the matching `CHANGELOG.md` section, and moves the major tag.
+9. [x] Add a linter (item 9): oxlint, since typescript-eslint does not support TypeScript 7; `npm run lint` runs in CI and in the release workflow.
 
 ### Phase 3: trigger-gated
 
-10. [ ] Spike `web-tree-sitter` 0.27 against the bundled grammars (item 8); if they load, upgrade and drop the relaunch; if not, decide between building grammars in `build.mjs` or staying pinned with a note.
-11. [ ] Incremental search index (item 11) when the `index` timing in job summaries regularly exceeds the `review` timing. Design in ADR-004.
-12. [ ] Move per-PR state out of the summary comment (item 10) when a repo hits the comment size limit or the `pending` cap.
-13. [ ] Receiver-qualified call edges (item 13) only after 10, since it needs parser changes.
+10. [x] Spike `web-tree-sitter` 0.27 against the bundled grammars (item 8): none load (older Emscripten dynamic-linking format). Decision in ADR-005: stay pinned; upgrade requires building grammars in-house.
+11. [x] Incremental search index (item 11): chunks and term frequencies in the index, git-based change detection, index-driven searcher. ADR-004 has the measured size cost and the term-dictionary follow-up.
+12. [x] Resolved differently (item 10): the state stays in the summary comment, and `renderSummary` now shrinks optional parts in steps until the whole comment fits GitHub's limit, so it cannot fail quietly. Moving the state elsewhere is no longer planned.
+13. [x] Receiver-qualified call edges (item 13): the parser records `this.x()`, `self.x()` and `Class.x()` as `Class.x`; `callersOfSymbol` drops callers known to target the same method name on another class and adds explicit class-qualified callers. Variables of unknown type stay name-based.

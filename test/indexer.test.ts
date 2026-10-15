@@ -1,7 +1,10 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { buildIndex, CodeGraph } from "../src/graph/indexer.js";
-import { buildChunks, Searcher } from "../src/graph/search.js";
+import { buildChunks, chunkText, readChunkText, Searcher } from "../src/graph/search.js";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { sha1 } from "../src/util/text.js";
 import { TempRepo } from "./helpers.js";
 
 describe("indexer", () => {
@@ -43,12 +46,50 @@ describe("indexer", () => {
     expect(g.symbolsOverlapping("src/index.ts", 2, 2).map((s) => s.name)).toEqual(["main"]);
   });
 
-  it("re-uses cached entries incrementally", async () => {
+  it("re-uses cached entries incrementally, without reading files git reports unchanged", async () => {
     const first = await buildIndex(repo.dir, cfg, null);
+    expect(first.data.commit).toBe(repo.git("rev-parse", "HEAD"));
+    expect(first.data.dirty).toBe(false);
     repo.write({ "src/lib/math.ts": "export function add(a: number, b: number) { return a + b + 0; }\n" });
     const second = await buildIndex(repo.dir, cfg, first.data);
     expect(second.stats.parsed).toBe(1);
     expect(second.stats.reused).toBe(second.stats.total - 1);
+    expect(second.stats.unread).toBe(second.stats.total - 1); // only the modified file was opened
+    expect(second.data.dirty).toBe(true);
+    // A dirty cache cannot trust git alone: everything is hashed again (but still reused when equal).
+    const third = await buildIndex(repo.dir, cfg, second.data);
+    expect(third.stats.unread).toBe(0);
+    expect(third.stats.parsed).toBe(0);
+    expect(third.stats.reused).toBe(third.stats.total);
+    repo.git("checkout", "--", "src/lib/math.ts");
+  });
+
+  it("stores chunks with term frequencies and stable hashes in the index", async () => {
+    const { data } = await buildIndex(repo.dir, cfg, null);
+    const entry = data.files["pkg/util/strings.py"];
+    expect(entry.chunks).toHaveLength(1);
+    const c = entry.chunks[0];
+    expect(c.name).toBe("shout");
+    expect(c.tf).toMatchObject({ shout: expect.any(Number), upper: 1 });
+    expect(c.len).toBeGreaterThan(3);
+    const content = readFileSync(join(repo.dir, "pkg/util/strings.py"), "utf8");
+    expect(c.hash).toBe(sha1(chunkText("pkg/util/strings.py", content, c)!));
+    const g = new CodeGraph(repo.dir, data);
+    expect(readChunkText(g, buildChunks(g).find((x) => x.name === "shout")!)).toContain("def shout");
+  });
+
+  it("searches from the index alone: a file deleted after indexing is still found", async () => {
+    const { data } = await buildIndex(repo.dir, cfg, null);
+    const g = new CodeGraph(repo.dir, data);
+    const content = readFileSync(join(repo.dir, "pkg/util/strings.py"), "utf8");
+    rmSync(join(repo.dir, "pkg/util/strings.py"));
+    try {
+      const s = new Searcher(buildChunks(g));
+      const hits = await s.search("uppercase shout string", 3);
+      expect(hits[0].chunk.path).toBe("pkg/util/strings.py");
+    } finally {
+      repo.write({ "pkg/util/strings.py": content });
+    }
   });
 
   it("finds importers of a deleted file", async () => {

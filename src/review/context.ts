@@ -173,9 +173,8 @@ export async function buildFileContext(
       if (COMMON_NAMES.has(sym.name)) continue;
       const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
       const relevant = graph
-        .callersOf(sym.name)
-        .filter((c) => !(c.path === path && c.symbol.start === sym.start))
-        .filter((c) => unique || c.path === path || graph.dependsOn(c.path, path));
+        .callersOfSymbol(sym, (c) => unique || c.path === path || graph.dependsOn(c.path, path))
+        .filter((c) => !(c.path === path && c.symbol.start === sym.start));
       const callers = relevant.slice(0, RETRIEVAL.callersPerSymbol);
       if (!callers.length) continue;
       const parts: string[] = [];

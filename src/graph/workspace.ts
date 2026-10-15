@@ -3,7 +3,7 @@ import type { Config } from "../config.js";
 import type { Embedder } from "../llm/types.js";
 import { log } from "../util/log.js";
 import { buildIndex, CodeGraph, loadIndex, saveIndex, type IndexStats } from "./indexer.js";
-import { buildChunks, EmbeddingStore, Searcher } from "./search.js";
+import { buildChunks, EmbeddingStore, readChunkText, Searcher } from "./search.js";
 
 export interface Workspace {
   graph: CodeGraph;
@@ -34,7 +34,7 @@ export async function openWorkspace(
     store = new EmbeddingStore(dir, `${embedder.provider}-${embedder.model}`);
     store.load();
   }
-  const searcher = new Searcher(chunks, embedder, store);
+  const searcher = new Searcher(chunks, embedder, store, { textOf: (c) => readChunkText(graph, c) });
   if (embedder) {
     const added = await searcher.ensureEmbeddings(opts.maxEmbedChunks ?? 30_000);
     if (added) searcher.persistEmbeddings();

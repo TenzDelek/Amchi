@@ -3,6 +3,7 @@ import { AnthropicChat, GeminiChat, GeminiEmbedder, OpenAIChat, OpenAIEmbedder }
 import { createLLM, createEmbedder } from "../src/llm/index.js";
 import { loadConfig } from "../src/config.js";
 
+// oxlint-disable-next-line typescript/no-explicit-any -- request bodies are asserted field by field
 type Call = { url: string; headers: Record<string, string>; body: any };
 
 function mockFetch(responses: { status?: number; json: unknown; headers?: Record<string, string> }[]) {

@@ -5,11 +5,13 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { DEFAULT_IGNORE, matchesAny, type Config } from "../config.js";
 import { log } from "../util/log.js";
 import { sha1 } from "../util/text.js";
+import { Git } from "../git/git.js";
 import { isIndexableText, langForPath } from "./languages.js";
 import { parseSource, type SymbolInfo } from "./parser.js";
+import { chunkFile, type ChunkMeta } from "./search.js";
 
-/** Bump when parser output changes so cached entries get re-parsed. */
-export const INDEX_VERSION = 3;
+/** Bump when parser output or chunking changes so cached entries get re-parsed. */
+export const INDEX_VERSION = 4;
 
 export interface FileEntry {
   path: string;
@@ -21,11 +23,16 @@ export interface FileEntry {
   /** Imports resolved to repo-relative paths. */
   resolved: string[];
   topLevelCalls: string[];
+  /** Search chunks with term frequencies, so search needs no file reads. */
+  chunks: ChunkMeta[];
 }
 
 export interface IndexData {
   version: number;
+  /** HEAD when the index was built; lets the next build ask git what changed. */
   commit?: string;
+  /** The working tree had uncommitted changes, so `commit` alone does not describe the content. */
+  dirty?: boolean;
   updatedAt: string;
   files: Record<string, FileEntry>;
 }
@@ -34,6 +41,8 @@ export interface IndexStats {
   total: number;
   parsed: number;
   reused: number;
+  /** Reused without even reading the file, because git reported it unchanged. */
+  unread: number;
   removed: number;
   ms: number;
 }
@@ -108,6 +117,38 @@ function shouldIndex(path: string, cfg: Config): boolean {
 // Build / incremental update
 // ---------------------------------------------------------------------------
 
+/** Paths with uncommitted changes (modified, added, deleted, renamed, untracked). Null when git cannot say. */
+function workingTreeChanges(git: Git): Set<string> | null {
+  let out: string;
+  try {
+    out = git.run(["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"]);
+  } catch {
+    return null;
+  }
+  const paths = new Set<string>();
+  for (const entry of out.split("\0")) if (entry.length > 3) paths.add(entry.slice(3));
+  return paths;
+}
+
+/**
+ * Paths that may differ between the cached index and the working tree, or null
+ * when that cannot be determined (no cached commit, shallow clone, dirty cache).
+ * Everything outside the set can be reused without reading the file.
+ */
+function changedSince(git: Git, prev: IndexData | null): Set<string> | null {
+  if (!prev?.commit || prev.dirty || !git.hasCommit(prev.commit)) return null;
+  let diff: string;
+  try {
+    diff = git.run(["diff", "--name-only", "-z", "--no-renames", prev.commit, "HEAD"]);
+  } catch {
+    return null;
+  }
+  const status = workingTreeChanges(git);
+  if (!status) return null;
+  for (const p of diff.split("\0")) if (p) status.add(p);
+  return status;
+}
+
 export async function buildIndex(
   root: string,
   cfg: Config,
@@ -123,9 +164,22 @@ export async function buildIndex(
   const files: Record<string, FileEntry> = {};
   let parsed = 0;
   let reused = 0;
+  let unread = 0;
   const maxBytes = cfg.index.max_file_kb * 1024;
+  const git = new Git(root);
+  const head = commit ?? git.revParse("HEAD") ?? undefined;
+  const changed = changedSince(git, prev);
+  const wtChanges = workingTreeChanges(git);
+  const dirty = wtChanges === null ? true : wtChanges.size > 0;
 
   for (const path of paths) {
+    const old = prev?.files[path];
+    if (old && changed && !changed.has(path)) {
+      files[path] = { ...old, resolved: [] };
+      reused++;
+      unread++;
+      continue;
+    }
     const abs = join(root, path);
     let buf: Buffer;
     try {
@@ -140,7 +194,6 @@ export async function buildIndex(
     if (buf.subarray(0, 8000).includes(0)) continue; // binary
     const content = buf.toString("utf8");
     const hash = sha1(content);
-    const old = prev?.files[path];
     if (old && old.hash === hash) {
       files[path] = { ...old, resolved: [] };
       reused++;
@@ -156,6 +209,7 @@ export async function buildIndex(
       imports: [],
       resolved: [],
       topLevelCalls: [],
+      chunks: [],
     };
     if (lang) {
       const p = await parseSource(content, lang);
@@ -165,6 +219,7 @@ export async function buildIndex(
         entry.topLevelCalls = p.topLevelCalls;
       }
     }
+    entry.chunks = chunkFile(path, content, entry.lines, entry.symbols);
     files[path] = entry;
     parsed++;
   }
@@ -185,10 +240,10 @@ export async function buildIndex(
   }
 
   const removed = prev ? Object.keys(prev.files).filter((p) => !files[p]).length : 0;
-  const data: IndexData = { version: INDEX_VERSION, commit, updatedAt: new Date().toISOString(), files };
-  const stats = { total: Object.keys(files).length, parsed, reused, removed, ms: Date.now() - t0 };
+  const data: IndexData = { version: INDEX_VERSION, commit: head, dirty, updatedAt: new Date().toISOString(), files };
+  const stats: IndexStats = { total: Object.keys(files).length, parsed, reused, unread, removed, ms: Date.now() - t0 };
   log.info(
-    `Indexed ${stats.total} files (${parsed} parsed, ${reused} cached, ${removed} removed) in ${(stats.ms / 1000).toFixed(1)}s`,
+    `Indexed ${stats.total} files (${parsed} parsed, ${reused} cached${unread ? `, ${unread} not read` : ""}, ${removed} removed) in ${(stats.ms / 1000).toFixed(1)}s`,
   );
   return { data, stats };
 }
@@ -374,6 +429,8 @@ export interface SymRef {
 export class CodeGraph {
   readonly defsByName = new Map<string, SymRef[]>();
   readonly callersByName = new Map<string, SymRef[]>();
+  /** "Class.method" -> symbols that call it on that class (see SymbolInfo.qualifiedCalls). */
+  readonly callersByQualified = new Map<string, SymRef[]>();
   readonly importers = new Map<string, Set<string>>();
   private contentCache = new Map<string, string | null>();
 
@@ -385,6 +442,7 @@ export class CodeGraph {
       for (const s of f.symbols) {
         push(this.defsByName, s.name, { path: f.path, symbol: s });
         for (const c of s.calls) push(this.callersByName, c, { path: f.path, symbol: s });
+        for (const q of s.qualifiedCalls ?? []) push(this.callersByQualified, q, { path: f.path, symbol: s });
       }
       for (const r of f.resolved) {
         (this.importers.get(r) ?? this.importers.set(r, new Set()).get(r)!).add(f.path);
@@ -448,6 +506,35 @@ export class CodeGraph {
 
   callersOf(name: string): SymRef[] {
     return this.callersByName.get(name) ?? [];
+  }
+
+  /**
+   * Callers of `sym` with class-aware filtering. Name-based callers that are known
+   * to target the same method name on a *different* class are dropped, and callers
+   * that name this class explicitly are added even when import resolution missed
+   * them. For symbols without a parent this is plain `callersOf`.
+   */
+  callersOfSymbol(sym: SymbolInfo, keep: (c: SymRef) => boolean = () => true): SymRef[] {
+    const name = sym.name;
+    const parent = sym.parent;
+    const mine = parent ? `${parent}.${name}` : null;
+    const targetsOtherClass = (c: SymRef) => {
+      if (!mine) return false;
+      const q = (c.symbol.qualifiedCalls ?? []).filter((x) => x.endsWith(`.${name}`));
+      return q.length > 0 && !q.includes(mine);
+    };
+    const out: SymRef[] = [];
+    const seen = new Set<string>();
+    const add = (c: SymRef) => {
+      const key = `${c.path}:${c.symbol.start}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(c);
+      }
+    };
+    if (mine) for (const c of this.callersByQualified.get(mine) ?? []) add(c);
+    for (const c of this.callersOf(name)) if (keep(c) && !targetsOtherClass(c)) add(c);
+    return out;
   }
 
   importersOf(path: string): string[] {

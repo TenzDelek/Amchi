@@ -14,7 +14,7 @@ export class Git {
     } catch (e) {
       if (opts.allowFail) return "";
       const err = e as { stderr?: Buffer; message: string };
-      throw new Error(`git ${args.join(" ")} failed: ${err.stderr?.toString() || err.message}`);
+      throw new Error(`git ${args.join(" ")} failed: ${err.stderr?.toString() || err.message}`, { cause: e });
     }
   }
 

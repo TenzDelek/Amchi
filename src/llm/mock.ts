@@ -104,7 +104,7 @@ export class MockEmbedder implements Embedder {
   readonly batchSize = 256;
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map((t) => {
-      const v = new Array(64).fill(0);
+      const v: number[] = Array.from({ length: 64 }, () => 0);
       for (const tok of tokenize(t)) {
         let h = 2166136261;
         for (let i = 0; i < tok.length; i++) h = Math.imul(h ^ tok.charCodeAt(i), 16777619);

@@ -36,7 +36,7 @@ flowchart LR
   V --> GH[Inline comments<br/>+ summary comment]
 ```
 
-1. **Index.** It parses every source file with tree-sitter (WASM, no native build) into symbols, call edges and resolved imports. The index is cached in `.amchi/` through `actions/cache`, so later runs only re-parse changed files. Embeddings, if enabled, are cached by content hash and only computed for new code.
+1. **Index.** It parses every source file with tree-sitter (WASM, no native build) into symbols, call edges, resolved imports and search chunks. The index is cached in `.amchi/` through `actions/cache` and records the commit it was built at, so later runs ask git what changed and only open and re-parse those files. Embeddings, if enabled, are cached by content hash and only computed for new code.
 2. **Retrieve.** For each changed file it gathers the enclosing functions after the change, the definitions of functions the new code calls, callers of the changed functions, references to removed functions, importers and related tests, plus a hybrid (BM25 + embedding) search for similar code. Everything is packed into a token budget by priority.
 3. **Review.** Files that depend on each other (imports, callers of changed functions) are sent in the same call so a signature change is reviewed next to its updated callers; small files share calls and large files go alone. The model returns structured JSON. Every finding is checked against the real diff lines GitHub will accept, deduplicated, filtered by severity and confidence, and capped.
 4. **Post.** Findings go out as one review with inline comments, and the summary comment is created or updated. Each comment carries a hidden fingerprint so re-runs never duplicate it.
@@ -131,9 +131,12 @@ Set `AMCHI_DUMP_PROMPTS=./prompts` to write every prompt and response to a folde
 ```bash
 npm install
 npm run typecheck
-npm test          # parser, indexer, diff, end-to-end review (mock LLM), GitHub posting
+npm run lint      # oxlint
+npm test          # parser, indexer, diff, end-to-end review (mock LLM), PR orchestration against a fake GitHub
 npm run build     # bundles dist/index.js + dist/cli.js and copies the WASM grammars
 ```
+
+Releases: push a `vX.Y.Z` tag. The release workflow checks `dist/`, publishes the GitHub release from the matching `CHANGELOG.md` section and moves the `v2` tag.
 
 `vitest.config.ts` runs test workers with `--liftoff-only`; without it the Swift grammar can crash a worker with a V8 out-of-memory error. Commit `dist/` together with any change under `src/`, since the action runs from it.
 
@@ -141,7 +144,8 @@ Project layout:
 
 ```
 src/
-  index.ts            GitHub Action entry (review / chat / index)
+  index.ts            GitHub Action entry (event dispatch, config, chat)
+  action/             PR review orchestration: state, posting, summary, outputs (testable with a fake GitHub)
   cli.ts              Local CLI
   run.ts              Shared review pipeline
   config.ts           .codereview.yml schema + defaults
@@ -156,5 +160,5 @@ src/
 ## Limitations
 
 - It's a CI job, not a hosted service. The first run on a large repo spends a little time indexing (and embedding, if enabled); after that the cache makes runs incremental.
-- Call edges are name-based. They're fast and language-agnostic, but not type-resolved, so a very common method name like `get` can link to several definitions. The context builder prefers definitions from imported files and the same directory.
+- Call edges are name-based. They're fast and language-agnostic, but not type-resolved, so a very common method name like `get` can link to several definitions. The context builder prefers definitions from imported files and the same directory, and uses the receiver of `this.x()` / `Class.x()` calls to tell classes apart; calls on variables of unknown type stay name-based.
 - It reviews what the model can see. Very large diffs are truncated per file, and files past `max_files`, the token budget or the time budget are listed as skipped in the summary, with the reason.

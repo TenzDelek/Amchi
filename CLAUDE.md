@@ -4,7 +4,9 @@ Self-hosted AI pull-request reviewer: a GitHub Action plus CLI that builds a tre
 
 ## Working here
 
-- `npm test`, `npm run typecheck`, `npm run build` are the whole loop. The vitest config pins `--liftoff-only` for workers; keep it, or the Swift grammar can kill a worker with a V8 zone OOM (SIGTRAP).
+- `npm test`, `npm run typecheck`, `npm run lint`, `npm run build` are the whole loop. The linter is oxlint, because typescript-eslint does not support TypeScript 7. The vitest config pins `--liftoff-only` for workers; keep it, or the Swift grammar can kill a worker with a V8 zone OOM (SIGTRAP).
+- `tree-sitter-wasms` grammars cannot be loaded by newer `web-tree-sitter` runtimes; ADR-005 has the spike and the upgrade path. Leave both pinned.
+- Review orchestration lives in `src/action/review-pr.ts` behind `PrPort` and `Reporter`; add GitHub-facing scenarios to `test/action.test.ts` with the fake port there rather than mocking Octokit.
 - `dist/` is committed and is what GitHub runs. After any change under `src/`, run the build and commit `dist/` in the same commit.
 - Offline runs: `--provider mock` drives the whole pipeline with a pattern-matching LLM. `AMCHI_DUMP_PROMPTS=<dir>` writes every prompt/response pair as markdown, which is the fastest way to see what the model was shown.
 

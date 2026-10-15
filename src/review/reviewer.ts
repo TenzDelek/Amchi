@@ -195,8 +195,8 @@ function affinity(candidates: FileDiff[], graph: CodeGraph): { groups: FileDiff[
         seen.add(sym.name);
         // Same precision rule as the context builder: trust a name match only when it is unique or imported.
         const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
-        for (const c of graph.callersOf(sym.name)) {
-          if (c.path !== f.path && paths.has(c.path) && (unique || graph.dependsOn(c.path, f.path))) union(f.path, c.path);
+        for (const c of graph.callersOfSymbol(sym, (x) => unique || graph.dependsOn(x.path, f.path))) {
+          if (c.path !== f.path && paths.has(c.path)) union(f.path, c.path);
         }
       }
     }
@@ -262,19 +262,21 @@ export function planBatches(
   return batches;
 }
 
-export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutput> {
-  const { cfg, graph, searcher, llm, pr } = input;
-  const skipped: { path: string; reason: string }[] = [];
-  const failed: string[] = [];
-  let budgetHit = false;
-  let deadlineHit = false;
-  const timings: Timings = { context: 0, review: 0, verify: 0, summary: 0 };
-  const prPaths = new Set(input.files.map((f) => f.path));
-  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
+// ---------------------------------------------------------------------------
+// Stages. Each takes typed input and returns typed output so it can be tested
+// alone; `reviewPullRequest` is the sequence.
+// ---------------------------------------------------------------------------
 
-  // ---- 1. choose files -----------------------------------------------------
+export interface Skipped {
+  path: string;
+  reason: string;
+}
+
+/** Stage 1: which changed files get reviewed, and why the others do not. */
+export function selectFiles(files: FileDiff[], cfg: Config): { candidates: FileDiff[]; skipped: Skipped[] } {
+  const skipped: Skipped[] = [];
   let candidates: FileDiff[] = [];
-  for (const f of input.files) {
+  for (const f of files) {
     if (f.binary) skipped.push({ path: f.path, reason: "binary" });
     else if (f.status === "deleted") skipped.push({ path: f.path, reason: "deleted" });
     else if (!isReviewable(f.path, cfg)) skipped.push({ path: f.path, reason: "ignored by config" });
@@ -286,46 +288,188 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
     for (const f of candidates.slice(cfg.review.max_files)) skipped.push({ path: f.path, reason: "max_files limit" });
     candidates = candidates.slice(0, cfg.review.max_files);
   }
+  return { candidates, skipped };
+}
 
-  // Deterministic check: deleted files that are still imported.
-  const outside: Finding[] = [];
-  const goneFiles = (input.allFiles ?? input.files)
+/** Deterministic findings that need no model: deleted or moved files that are still imported. */
+export function deletedImportFindings(files: FileDiff[], graph: CodeGraph): Finding[] {
+  const out: Finding[] = [];
+  const goneFiles = files
     .filter((x) => x.status === "deleted" || (x.status === "renamed" && x.oldPath))
     .map((f) => ({ f, gone: f.status === "deleted" ? f.path : f.oldPath! }))
     .filter(({ gone }) => !graph.file(gone)); // still exists
   const importersByGone = graph.importersOfMissingMany(goneFiles.map((g) => g.gone));
   for (const { f, gone } of goneFiles) {
     const importers = importersByGone.get(gone) ?? [];
-    if (importers.length) {
-      const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
-      outside.push({
-        path: importers[0],
-        line: 1,
-        severity: "high",
-        category: "breaking-change",
-        title,
-        body: `Still imported by: ${importers.slice(0, 8).map((p) => `\`${p}\``).join(", ")}`,
-        confidence: 0.9,
-        fingerprint: fingerprint(gone, title),
-      });
-    }
+    if (!importers.length) continue;
+    const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
+    out.push({
+      path: importers[0],
+      line: 1,
+      severity: "high",
+      category: "breaking-change",
+      title,
+      body: `Still imported by: ${importers.slice(0, 8).map((p) => `\`${p}\``).join(", ")}`,
+      confidence: 0.9,
+      fingerprint: fingerprint(gone, title),
+    });
   }
+  return out;
+}
 
-  // ---- 2. batch files by diff size ----------------------------------------
+interface BatchContext {
+  cfg: Config;
+  graph: CodeGraph;
+  searcher: Searcher;
+  llm: LLM;
+  header: string;
+  headerTokens: number;
+  prPaths: Set<string>;
+}
+
+interface BatchResult {
+  findings: Finding[];
+  fileSummaries: Record<string, string>;
+  /** The full prompt, kept for the verify pass. */
+  prompt: string;
+  /** Milliseconds spent in context retrieval for this batch. */
+  contextMs: number;
+  /** Why the call did not complete, if it did not. */
+  outcome: "ok" | "budget" | "deadline" | "failed";
+}
+
+/** Stage 3: one model call for one batch: retrieve context per file, ask, normalise the answer. */
+export async function reviewBatch(batch: Batch, ctx: BatchContext): Promise<BatchResult> {
+  const { cfg, graph, searcher, llm } = ctx;
   const perCall = cfg.limits.max_input_tokens_per_call;
+  const ctxBudget = Math.max(
+    REVIEW.minContextTokens,
+    Math.floor(((perCall - ctx.headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall) / batch.files.length),
+  );
+  const parts: string[] = [ctx.header];
+  const rules = new Map<string, Rule>();
+  for (const f of batch.files) for (const r of rulesForPath(f.path, cfg)) rules.set(r.rule, r);
+  const rulesText = renderRules([...rules.values()]);
+  if (rulesText) parts.push(rulesText);
+
+  let contextMs = 0;
+  for (const f of batch.files) {
+    let fileCtx = "";
+    const tc = Date.now();
+    try {
+      fileCtx = await buildFileContext(f, graph, searcher, ctxBudget, ctx.prPaths);
+    } catch (e) {
+      log.warn(`Context retrieval failed for ${f.path}: ${(e as Error).message}`);
+    }
+    contextMs += Date.now() - tc;
+    parts.push(
+      `\n==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================\n` +
+        `## Diff\n\`\`\`diff\n${batch.diffs.get(f.path)}\n\`\`\`\n` +
+        (fileCtx ? `\n## Repository context for ${f.path}\n${fileCtx}\n` : ""),
+    );
+  }
+  parts.push(
+    `\nReview the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} above. ` +
+      `Return a "files" entry for each of: ${batch.files.map((f) => f.path).join(", ")}.`,
+  );
+  const prompt = parts.join("\n");
+  const result: BatchResult = { findings: [], fileSummaries: {}, prompt, contextMs, outcome: "ok" };
+
+  try {
+    const res = await llm.chat({
+      system: REVIEW_SYSTEM(cfg),
+      user: prompt,
+      json: true,
+      maxTokens: cfg.limits.max_output_tokens,
+      label: `review:${batch.files.map((f) => f.path).join(",")}`,
+    });
+    const parsed = parseModelJson<RawReview>(res.text);
+    for (const s of parsed.files ?? []) if (s.path && s.summary) result.fileSummaries[s.path] = s.summary;
+    for (const rf of parsed.findings ?? []) {
+      const f = normalizeFinding(rf, batch.files);
+      if (f) result.findings.push(f);
+    }
+  } catch (e) {
+    if (e instanceof BudgetExceededError) result.outcome = "budget";
+    else if (e instanceof DeadlineExceededError) result.outcome = "deadline";
+    else result.outcome = "failed";
+    const what = result.outcome === "failed" ? `Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ` : "";
+    log.warn(`${what}${(e as Error).message}`);
+  }
+  return result;
+}
+
+export interface Resolved {
+  /** Findings anchored, deduplicated, above thresholds and under the comment cap. */
+  inline: Finding[];
+  /** Findings that could not be anchored plus deterministic ones, after the same filters. */
+  outside: Finding[];
+  /** Anchored findings before thresholds and the cap. */
+  anchored: number;
+  /** After dedupe and thresholds, before the cap. */
+  passing: number;
+  dropped: number;
+}
+
+/** Stage 5: snap findings to commentable lines, dedupe, apply thresholds, cap. */
+export function resolveFindings(
+  findings: Finding[],
+  outside: Finding[],
+  anchorFiles: FileDiff[],
+  candidates: FileDiff[],
+  cfg: Config,
+): Resolved {
+  const byPath = new Map(candidates.map((f) => [f.path, f]));
+  const anchorByPath = new Map(anchorFiles.map((f) => [f.path, f]));
+  const inlineAll: Finding[] = [];
+  const unanchored: Finding[] = [...outside];
+  for (const finding of findings) {
+    const fd = anchorByPath.get(finding.path) ?? byPath.get(finding.path);
+    if (!fd) continue;
+    const anchored = anchor(finding, fd, cfg);
+    if (anchored) inlineAll.push(anchored);
+    else unanchored.push(finding);
+  }
+  const minSev = severityRank(cfg.review.min_severity);
+  const passes = (f: Finding) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence;
+  const passing = dedupe(inlineAll).filter(passes);
+  passing.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || b.confidence - a.confidence);
+  const inline = passing.slice(0, cfg.review.max_comments);
+  return {
+    inline,
+    outside: dedupe(unanchored).filter(passes),
+    anchored: inlineAll.length,
+    passing: passing.length,
+    dropped: Math.max(0, inlineAll.length - inline.length),
+  };
+}
+
+export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutput> {
+  const { cfg, graph, searcher, llm, pr } = input;
+  const timings: Timings = { context: 0, review: 0, verify: 0, summary: 0 };
+  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
+
+  // 1. select
+  const { candidates, skipped } = selectFiles(input.files, cfg);
+  const deterministic = deletedImportFindings(input.allFiles ?? input.files, graph);
+
+  // 2. plan
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + REVIEW.systemPromptTokens;
-  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * REVIEW.diffShareOfCall);
+  const maxDiffPerBatch = Math.floor((cfg.limits.max_input_tokens_per_call - headerTokens) * REVIEW.diffShareOfCall);
   const priority = new Set(input.priorityPaths ?? []);
   const batches = planBatches(candidates, graph, maxDiffPerBatch, priority);
   const carried = candidates.filter((f) => priority.has(f.path)).length;
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
 
-  // ---- 3. review each batch -------------------------------------------------
-  const fileSummaries: Record<string, string> = { ...(input.previousFileSummaries ?? {}) };
+  // 3. review
+  const ctx: BatchContext = { cfg, graph, searcher, llm, header, headerTokens, prPaths: new Set(input.files.map((f) => f.path)) };
+  const fileSummaries: Record<string, string> = { ...input.previousFileSummaries };
   const raw: { finding: Finding; batch: number }[] = [];
   const batchPrompts: string[] = [];
-
+  const failed: string[] = [];
+  let budgetHit = false;
+  let deadlineHit = false;
   const t0 = Date.now();
   await mapLimit(batches, cfg.limits.concurrency, async (batch, bi) => {
     if (pastDeadline()) {
@@ -333,70 +477,24 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
       for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
       return;
     }
-    const ctxBudget = Math.max(
-      REVIEW.minContextTokens,
-      Math.floor(((perCall - headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall) / batch.files.length),
-    );
-    const parts: string[] = [header];
-    const rules = new Map<string, Rule>();
-    for (const f of batch.files) for (const r of rulesForPath(f.path, cfg)) rules.set(r.rule, r);
-    const rulesText = renderRules([...rules.values()]);
-    if (rulesText) parts.push(rulesText);
-
-    for (const f of batch.files) {
-      let ctx = "";
-      const tc = Date.now();
-      try {
-        ctx = await buildFileContext(f, graph, searcher, ctxBudget, prPaths);
-      } catch (e) {
-        log.warn(`Context retrieval failed for ${f.path}: ${(e as Error).message}`);
-      }
-      timings.context += Date.now() - tc;
-      parts.push(
-        `\n==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================\n` +
-          `## Diff\n\`\`\`diff\n${batch.diffs.get(f.path)}\n\`\`\`\n` +
-          (ctx ? `\n## Repository context for ${f.path}\n${ctx}\n` : ""),
-      );
-    }
-    parts.push(
-      `\nReview the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} above. ` +
-        `Return a "files" entry for each of: ${batch.files.map((f) => f.path).join(", ")}.`,
-    );
-    const user = parts.join("\n");
-    batchPrompts[bi] = user;
-
-    try {
-      const res = await llm.chat({
-        system: REVIEW_SYSTEM(cfg),
-        user,
-        json: true,
-        maxTokens: cfg.limits.max_output_tokens,
-        label: `review:${batch.files.map((f) => f.path).join(",")}`,
-      });
-      const parsed = parseModelJson<RawReview>(res.text);
-      for (const s of parsed.files ?? []) if (s.path && s.summary) fileSummaries[s.path] = s.summary;
-      for (const rf of parsed.findings ?? []) {
-        const f = normalizeFinding(rf, batch.files);
-        if (f) raw.push({ finding: f, batch: bi });
-      }
-    } catch (e) {
-      if (e instanceof BudgetExceededError) {
-        budgetHit = true;
-        for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
-        log.warn(e.message);
-      } else if (e instanceof DeadlineExceededError) {
-        deadlineHit = true;
-        for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
-        log.warn(e.message);
-      } else {
-        failed.push(...batch.files.map((f) => f.path));
-        log.warn(`Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ${(e as Error).message}`);
-      }
+    const r = await reviewBatch(batch, ctx);
+    timings.context += r.contextMs;
+    batchPrompts[bi] = r.prompt;
+    Object.assign(fileSummaries, r.fileSummaries);
+    for (const finding of r.findings) raw.push({ finding, batch: bi });
+    if (r.outcome === "budget") {
+      budgetHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
+    } else if (r.outcome === "deadline") {
+      deadlineHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+    } else if (r.outcome === "failed") {
+      failed.push(...batch.files.map((f) => f.path));
     }
   });
   timings.review = Date.now() - t0; // wall time of the review calls, context retrieval included
 
-  // ---- 4. optional verification pass ----------------------------------------
+  // 4. verify
   let findings = raw;
   let unverified = 0;
   if (input.verify && raw.length) {
@@ -405,34 +503,17 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
     timings.verify = Date.now() - tv;
   }
 
-  // ---- 5. anchor, filter, dedupe, cap ---------------------------------------
-  const byPath = new Map(candidates.map((f) => [f.path, f]));
-  const anchorByPath = new Map((input.anchorFiles ?? []).map((f) => [f.path, f]));
-  const inlineAll: Finding[] = [];
-  for (const { finding } of findings) {
-    const fd = anchorByPath.get(finding.path) ?? byPath.get(finding.path);
-    if (!fd) continue;
-    const anchored = anchor(finding, fd, cfg);
-    if (anchored) inlineAll.push(anchored);
-    else outside.push(finding);
-  }
-  const minSev = severityRank(cfg.review.min_severity);
-  const passing = dedupe(inlineAll).filter(
-    (f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence,
-  );
-  passing.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || b.confidence - a.confidence);
-  const inline = passing.slice(0, cfg.review.max_comments);
-  const dropped = inlineAll.length - inline.length;
-  const outsideKept = dedupe(outside).filter((f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence);
+  // 5. resolve
+  const resolved = resolveFindings(findings.map((r) => r.finding), deterministic, input.anchorFiles ?? [], candidates, cfg);
 
-  // ---- 6. summary -----------------------------------------------------------
+  // 6. summarise
   let summary: SummaryJson | null = null;
   if (cfg.summary.enabled) {
     const ts = Date.now();
     try {
       // The summary is one small call; give it a short grace period past the deadline so a partial run still gets a score.
       const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + REVIEW.summaryGraceMs : undefined;
-      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
+      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, resolved.inline.concat(resolved.outside), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
       log.warn(`Summary generation failed: ${(e as Error).message}`);
@@ -443,16 +524,16 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   const funnel: Funnel = {
     raw: raw.length,
     verified: findings.length,
-    anchored: inlineAll.length,
-    passing: passing.length,
-    capped: inline.length,
+    anchored: resolved.anchored,
+    passing: resolved.passing,
+    capped: resolved.inline.length,
   };
   log.info(`Findings funnel: ${renderFunnel(funnel)} · timings: ${renderTimings(timings)}`);
 
   return {
-    inline,
-    outside: outsideKept,
-    dropped: Math.max(0, dropped),
+    inline: resolved.inline,
+    outside: resolved.outside,
+    dropped: resolved.dropped,
     fileSummaries,
     summary,
     reviewed: candidates.filter((f) => !failed.includes(f.path) && !skipped.some((s) => s.path === f.path)),

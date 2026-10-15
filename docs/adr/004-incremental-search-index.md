@@ -1,6 +1,6 @@
 # ADR-004: Incremental search index
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-10-15
 **Deciders:** TenzDelek (maintainer)
 
@@ -23,16 +23,22 @@ for every user.
 
 ## Decision
 
-Proposed, not yet implemented: store each file's chunk spans and term
-frequencies in its index entry at parse time, so the searcher builds postings
-from the index without reading files, and chunk text is read lazily only for
-search hits and for embedding new chunks. Use the stored commit and `git diff
---name-only` to find candidate changes instead of hashing every file, keeping
-the hash check only for files git reports as changed.
+Implemented 2026-10-15 (`INDEX_VERSION` 4). Each file's index entry carries its
+chunk spans with term frequencies, document length and content hash, computed
+when the file is parsed. The searcher builds BM25 postings from the index alone;
+chunk text is regenerated from the file only when a chunk must be embedded. The
+index records the commit it was built at and whether the working tree was dirty;
+when it was clean and the commit is still present, `git diff --name-only` plus
+`git status` give the set of files that may have changed and every other file is
+reused without being opened. A dirty cache or a missing commit falls back to
+hashing every file, as before.
 
-Trigger for doing the work: a user reports indexing time or memory as a problem
-on a large repository, or the `index` timing in the job summary regularly
-exceeds the review timing.
+Measured on this repository (58 files, 406 chunks): the gzipped index grew from
+17 KB to 91 KB (raw JSON 77 KB to 347 KB), about five times rather than the two
+to three estimated below. The term-frequency maps are the bulk of it. A global
+term dictionary with numeric ids per chunk would cut the raw size by roughly
+half; it is left as a follow-up until a large repository shows the cache size or
+parse time matters.
 
 ## Options Considered
 
@@ -98,8 +104,8 @@ If adopted:
 
 ## Action Items
 
-1. [ ] Add the `index` timing to the job summary on a few large repositories to
-   confirm the trigger condition (already printed; collect numbers).
-2. [ ] Prototype term-frequency storage and measure index size and parse time.
-3. [ ] If accepted, bump `INDEX_VERSION`, implement, and note the one-time reparse
-   in release notes.
+1. [x] Implement chunk metadata in the index, git-based change detection, and the
+   index-driven searcher; bump `INDEX_VERSION`; note the one-time reparse in the
+   changelog.
+2. [ ] Collect index size and `index` timing from a large repository's job summary.
+3. [ ] If size matters there, add a global term dictionary with numeric ids per chunk.

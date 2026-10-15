@@ -1,0 +1,56 @@
+# Cut a release from a version tag: verify, build, check dist/, publish the GitHub
+# release with the matching CHANGELOG section, and move the major tag (v2 -> this).
+#
+#   git tag v2.1.0 && git push origin v2.1.0
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - name: dist/ must match src/
+        run: |
+          npm run build
+          git diff --exit-code --stat dist/ || (echo "::error::dist/ is out of date — run npm run build and commit" && exit 1)
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # The section for this version, or Unreleased when it was not renamed before tagging.
+          awk -v v="$version" '
+            /^## / { on = ($2 == v || $2 == "Unreleased" && !found); if (on) found = 1; next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "No CHANGELOG section for $version" > notes.md; fi
+          echo "major=v${version%%.*}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+
+      - name: Move the major tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f "${{ steps.notes.outputs.major }}" "$GITHUB_REF_NAME"
+          git push -f origin "${{ steps.notes.outputs.major }}"

@@ -1,15 +1,14 @@
 import * as core from "@actions/core";
 import { context } from "@actions/github";
-import { loadConfig, runDeadline, severityRank, type Config, type Severity } from "./config.js";
+import { loadConfig, type Config } from "./config.js";
 import { answerQuestion } from "./chat/chat.js";
 import { Git } from "./git/git.js";
 import { parseUnifiedDiff } from "./git/diff.js";
 import { GitHubClient, type PullInfo } from "./github/client.js";
 import { openWorkspace } from "./graph/workspace.js";
-import { createEmbedder, createLLM, keysFromEnv, type TrackedLLM } from "./llm/index.js";
-import { MARKER_PREFIX_RE, renderSummary, parseState, setBadgeStyle, type ReviewState } from "./review/render.js";
-import { runReview } from "./run.js";
-import { renderFunnel, renderTimings, similar } from "./review/reviewer.js";
+import { createEmbedder, createLLM, keysFromEnv } from "./llm/index.js";
+import { MARKER_PREFIX_RE } from "./review/render.js";
+import { checkoutHead, logUsage, reviewPr, type Reporter } from "./action/review-pr.js";
 import { isAbsolute } from "node:path";
 import { log, setVerbose } from "./util/log.js";
 import { relaunchWithBaselineWasm } from "./util/relaunch.js";
@@ -107,7 +106,7 @@ async function main() {
     await gh.react(kind, comment.id, "eyes");
 
     if (pr && /^(review|re-?review|full review)\b/i.test(question)) {
-      await reviewPr(gh, cfg, keys, root, pr, { force: true });
+      await reviewPr({ gh, report: actionsReporter }, cfg, keys, root, pr, { force: true });
       await gh.react(kind, comment.id, "rocket");
       return;
     }
@@ -177,7 +176,7 @@ async function main() {
       core.setOutput("skipped", "no API key");
       return;
     }
-    await reviewPr(gh, cfg, keys, root, pr, { force: false });
+    await reviewPr({ gh, report: actionsReporter }, cfg, keys, root, pr, { force: false });
     return;
   }
 
@@ -198,155 +197,15 @@ function loadActionConfig(root: string, baseSha?: string): Config {
   return loadConfig(root, input("config_path") || undefined, configOverrides(), { readFile, trusted: false });
 }
 
+/** Results go to action outputs, the job summary and the check status. */
+const actionsReporter: Reporter = {
+  output: (name, value) => core.setOutput(name, value),
+  summary: (md) => core.summary.addRaw(md).write().then(() => undefined).catch(() => undefined),
+  fail: (msg) => core.setFailed(msg),
+};
+
 function hasKey(cfg: Config, keys: ReturnType<typeof keysFromEnv>): boolean {
   return cfg.provider === "mock" || !!(keys.openai || keys.anthropic || keys.gemini);
-}
-
-function shouldSkip(cfg: Config, pr: PullInfo, force: boolean): string | null {
-  if (force) return null;
-  if (!cfg.review.enabled) return "reviews disabled in config";
-  if (cfg.review.skip_drafts && pr.draft) return "draft PR";
-  if (cfg.review.skip_authors.map((a) => a.toLowerCase()).includes(pr.author.toLowerCase())) return `author ${pr.author} is skipped`;
-  const label = pr.labels.find((l) => cfg.review.skip_labels.includes(l));
-  if (label) return `label "${label}"`;
-  const title = pr.title.toLowerCase();
-  const pat = cfg.review.skip_title_patterns.find((p) => title.includes(p.toLowerCase()));
-  if (pat) return `title contains "${pat}"`;
-  return null;
-}
-
-function checkoutHead(root: string, headSha: string) {
-  const git = new Git(root);
-  const head = git.revParse("HEAD");
-  if (head === headSha) return;
-  log.info(`Workspace is at ${head?.slice(0, 7) ?? "?"}, checking out PR head ${headSha.slice(0, 7)}`);
-  if (!git.ensureCommit(headSha)) throw new Error(`Could not fetch PR head ${headSha}. Use actions/checkout with fetch-depth: 0.`);
-  git.run(["checkout", "--detach", "--force", headSha]);
-}
-
-async function reviewPr(
-  gh: GitHubClient,
-  cfg: Config,
-  keys: ReturnType<typeof keysFromEnv>,
-  root: string,
-  pr: PullInfo,
-  opts: { force: boolean },
-) {
-  const skip = shouldSkip(cfg, pr, opts.force);
-  if (skip) {
-    log.info(`Skipping review: ${skip}`);
-    core.setOutput("skipped", skip);
-    return;
-  }
-  setBadgeStyle(cfg.review.badges);
-  checkoutHead(root, pr.headSha);
-  const git = new Git(root);
-  if (!git.ensureCommit(pr.baseSha)) throw new Error(`Could not fetch base commit ${pr.baseSha}. Use actions/checkout with fetch-depth: 0.`);
-
-  const existing = await gh.findSummaryComment(pr.number);
-  const state: ReviewState = existing ? parseState(existing.body) : {};
-  let incrementalFrom: string | undefined;
-  if (!opts.force && state.lastSha) {
-    if (state.lastSha === pr.headSha) {
-      log.info(`Commit ${pr.headSha.slice(0, 7)} was already reviewed; comment "${cfg.chat.trigger} review" to force a re-run`);
-      return;
-    }
-    if (cfg.review.incremental && git.ensureCommit(state.lastSha) && git.isAncestor(state.lastSha, pr.headSha)) {
-      incrementalFrom = state.lastSha;
-    }
-  }
-
-  // The run gets a wall-clock budget (indexing included) so partial results are posted before the job's own timeout kills it.
-  const deadline = runDeadline(cfg);
-  const llm = createLLM(cfg, keys, { deadline });
-  const embedder = createEmbedder(cfg, keys, { deadline });
-  const res = await runReview({
-    root,
-    cfg,
-    llm,
-    embedder,
-    baseSha: pr.baseSha,
-    headSha: pr.headSha,
-    title: pr.title,
-    body: pr.body,
-    incrementalFrom,
-    previousFileSummaries: incrementalFrom ? state.files : undefined,
-    deadline,
-    priorityPaths: state.pending,
-  });
-  const { out } = res;
-
-  // Never repeat a comment that was already posted on this PR (even if resolved),
-  // including the same issue re-titled by the model on a later run.
-  const posted = await gh.existingComments(pr.number);
-  const postedFps = new Set(posted.map((p) => p.fingerprint));
-  const fresh = out.inline.filter(
-    (f) =>
-      !postedFps.has(f.fingerprint) &&
-      !posted.some((p) => p.path === f.path && Math.abs(p.line - (f.endLine ?? f.line)) <= 3 && similar(p.title, f.title)),
-  );
-  if (fresh.length < out.inline.length) log.info(`Skipping ${out.inline.length - fresh.length} finding(s) already posted earlier`);
-
-  const threshold = cfg.review.request_changes_on;
-  const blocking = threshold !== "none" && fresh.some((f) => severityRank(f.severity) >= severityRank(threshold as Severity));
-  const failedToPlace = await gh.postReview(
-    pr.number,
-    pr.headSha,
-    fresh,
-    blocking ? "REQUEST_CHANGES" : "COMMENT",
-    fresh.length ? `Found ${fresh.length} issue(s) — see the summary comment for an overview.` : "",
-  );
-  out.funnel.posted = fresh.length - failedToPlace.length;
-  // Anything GitHub refused to anchor goes into the summary instead.
-  out.outside.push(...failedToPlace);
-  out.inline = out.inline.filter((f) => !failedToPlace.includes(f));
-
-  // Link each finding in the summary to its inline comment (from this or an earlier run).
-  const commentUrls: Record<string, string> = {};
-  const all = fresh.length ? await gh.existingComments(pr.number) : posted;
-  for (const p of all) if (p.fingerprint) commentUrls[p.fingerprint] = p.url;
-
-  const summary = renderSummary(
-    out,
-    {
-      baseSha: res.mergeBase,
-      headSha: pr.headSha,
-      headSubject: git.run(["log", "-1", "--format=%s", pr.headSha], { allowFail: true }).trim() || undefined,
-      incrementalFrom: res.incrementalFrom,
-      provider: llm.provider,
-      model: llm.model,
-      usage: llm.usage,
-      trigger: cfg.chat.trigger,
-      allFiles: res.allFiles,
-      commentUrls,
-      botName: cfg.chat.trigger.replace(/^@/, "") || "Amchi",
-    },
-    state,
-  );
-  await gh.upsertSummary(pr.number, summary, existing?.id);
-  logUsage(llm);
-  log.info(`Findings funnel: ${renderFunnel(out.funnel)} · timings: ${renderTimings(out.timings)}`);
-
-  core.setOutput("findings", out.inline.length + out.outside.length);
-  core.setOutput("confidence", out.summary?.confidence ?? "");
-  core.setOutput("input_tokens", llm.usage.inputTokens);
-  core.setOutput("output_tokens", llm.usage.outputTokens);
-  await core.summary
-    .addRaw(summary.replace(/<!--.*?-->/gs, ""))
-    .addRaw(`\n\n<sub>Findings funnel: ${renderFunnel(out.funnel)} · ${renderTimings(out.timings)}</sub>\n`)
-    .write()
-    .catch(() => undefined);
-
-  const failOn = cfg.review.fail_on;
-  if (failOn !== "none") {
-    const bad = [...out.inline, ...out.outside].filter((f) => severityRank(f.severity) >= severityRank(failOn));
-    if (bad.length) core.setFailed(`${bad.length} finding(s) at or above "${failOn}" severity`);
-  }
-}
-
-function logUsage(llm: TrackedLLM) {
-  const u = llm.usage;
-  log.info(`LLM usage: ${u.calls} call(s), ${u.inputTokens.toLocaleString()} input / ${u.outputTokens.toLocaleString()} output tokens`);
 }
 
 function escapeRe(s: string) {

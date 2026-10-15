@@ -102,3 +102,21 @@ func New() *Service { return &Service{} }
     expect(rust.imports).toContain("crate::store::Store");
   });
 });
+
+describe("qualified calls", () => {
+  it("records the receiver class for this/self/static calls across languages", async () => {
+    const ts = await parseSource("class Cart {\n  save() {}\n  reload() { this.save(); Store.flush(); cart.save(); new Repo().save(); }\n}\n", "typescript");
+    const reload = ts!.symbols.find((s) => s.name === "reload")!;
+    expect(reload.qualifiedCalls.sort()).toEqual(["Cart.save", "Store.flush"]);
+    expect(reload.calls.sort()).toEqual(["Repo", "flush", "save"]);
+
+    const py = await parseSource("class Cart:\n    def save(self):\n        pass\n    def reload(self):\n        self.save()\n        Store.flush()\n", "python");
+    expect(py!.symbols.find((s) => s.name === "reload")!.qualifiedCalls.sort()).toEqual(["Cart.save", "Store.flush"]);
+
+    const java = await parseSource("class A { void go() {} void run() { this.go(); Store.save(1); helper(); } }", "java");
+    expect(java!.symbols.find((s) => s.name === "run")!.qualifiedCalls.sort()).toEqual(["A.go", "Store.save"]);
+
+    const rust = await parseSource("struct A;\nimpl A {\n  fn go(&self) {}\n  fn run(&self) { self.go(); Store::save(); }\n}\n", "rust");
+    expect(rust!.symbols.find((s) => s.name === "run")!.qualifiedCalls.sort()).toEqual(["A.go", "Store.save"]);
+  });
+});

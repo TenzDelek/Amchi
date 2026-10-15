@@ -12,10 +12,15 @@ Notable changes to Amchi. Each entry names the behaviour a user or operator will
 
 ### Added
 
+- **Class-aware callers.** The code graph records the receiver of `this.x()`, `self.x()` and `Class.x()` calls, so the callers shown for a changed method no longer include other classes' methods of the same name.
+- **Faster re-indexing.** Search chunks and their term statistics are stored in the index, and git decides which files may have changed, so unchanged files are no longer read on later runs. The index format changed (`INDEX_VERSION` 4): the first run after upgrading re-parses the whole repository once, and the cache is about five times larger (91 KB instead of 17 KB on this repository). Embedding caches are unaffected.
+- The summary comment shrinks its optional parts in steps (file table, stored summaries, agent prompt, diagram, long finding lists) so it always fits GitHub's 65,536-character limit instead of failing to post on very large PRs.
 - `verify_model`: run the `review.verify` pass on a cheaper model from the same provider.
 - Findings funnel and per-stage timings (`raw → verified → anchored → passing → capped → posted`) in the run log and the GitHub job summary. The PR comment is unchanged.
 - The summary notes when findings were posted without the verify pass because the deadline or token budget ended it early.
-- `docs/adr/`: architecture decision records, `docs/tech-debt.md` with the prioritised debt inventory, and a `CLAUDE.md` for agents working on the repo.
+- `docs/adr/`: architecture decision records (including ADR-005 on why the tree-sitter runtime stays pinned), `docs/tech-debt.md` with the prioritised debt inventory, and a `CLAUDE.md` for agents working on the repo.
+- A release workflow: pushing a `vX.Y.Z` tag verifies `dist/`, publishes the GitHub release from the matching changelog section, and moves the major tag.
+- `npm run lint` (oxlint) in CI. The PR review orchestration moved to `src/action/review-pr.ts` behind small ports and is covered by tests that need no GitHub.
 - Unknown or misspelled keys in `.codereview.yml` are now reported as warnings instead of being silently ignored.
 
 ### Fixed

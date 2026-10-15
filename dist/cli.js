@@ -11409,7 +11409,7 @@ function lineSlice(content, startLine, endLine) {
   return lines.slice(Math.max(0, startLine - 1), Math.min(lines.length, endLine)).join("\n");
 }
 async function mapLimit(items, limit, fn) {
-  const results = new Array(items.length);
+  const results = Array.from({ length: items.length });
   let next = 0;
   const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
     while (true) {
@@ -11547,7 +11547,7 @@ var Git = class {
     } catch (e) {
       if (opts.allowFail) return "";
       const err2 = e;
-      throw new Error(`git ${args2.join(" ")} failed: ${err2.stderr?.toString() || err2.message}`);
+      throw new Error(`git ${args2.join(" ")} failed: ${err2.stderr?.toString() || err2.message}`, { cause: e });
     }
   }
   revParse(ref) {
@@ -11594,8 +11594,8 @@ import { isAbsolute as isAbsolute2, join as join5 } from "node:path";
 
 // src/graph/indexer.ts
 import { execFileSync as execFileSync2 } from "node:child_process";
-import { existsSync as existsSync3, lstatSync, mkdirSync, readFileSync as readFileSync2, readdirSync, writeFileSync } from "node:fs";
-import { dirname as dirname2, join as join3, posix } from "node:path";
+import { existsSync as existsSync4, lstatSync, mkdirSync as mkdirSync2, readFileSync as readFileSync3, readdirSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2, join as join4, posix } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 // src/graph/languages.ts
@@ -12013,6 +12013,25 @@ function calleeName(node) {
   }
   return node.namedChildCount ? rightmostIdent(node.namedChild(0)) : null;
 }
+var SELF_WORDS = /* @__PURE__ */ new Set(["this", "self", "super", "cls", "Self"]);
+function receiverOf(node, container) {
+  let holder = null;
+  for (const field of ["function", "name", "method", "constructor", "type", "macro"]) {
+    const f = node.childForFieldName?.(field);
+    if (f) {
+      holder = f;
+      break;
+    }
+  }
+  if (!holder && node.namedChildCount) holder = node.namedChild(0);
+  let obj = node.childForFieldName?.("object") ?? node.childForFieldName?.("receiver") ?? null;
+  if (!obj && holder && holder.namedChildCount >= 2) obj = holder.namedChild(0);
+  if (!obj) return null;
+  const text = obj.text;
+  if (SELF_WORDS.has(text) || /^(this|self|super)(_expression)?$/.test(obj.type)) return container ?? null;
+  if (IDENT_TYPES.has(obj.type) && /^[A-Z][A-Za-z0-9_]*$/.test(text)) return text;
+  return null;
+}
 function hasArgumentPart(node) {
   for (let i = 0; i < node.namedChildCount; i++) if (node.namedChild(i).type === "argument_part") return true;
   return false;
@@ -12149,6 +12168,7 @@ async function parseSource(content, lang) {
   const imports = /* @__PURE__ */ new Set();
   const topCalls = /* @__PURE__ */ new Set();
   const symbolCalls = /* @__PURE__ */ new Map();
+  const symbolQualified = /* @__PURE__ */ new Map();
   const bodyOwner = /* @__PURE__ */ new Map();
   const stack = [{ node: tree.rootNode, owner: null, container: void 0 }];
   let visited = 0;
@@ -12179,7 +12199,8 @@ async function parseSource(content, lang) {
           end: node.endPosition.row + 1,
           parent: container,
           signature: signatureOf(node),
-          calls: []
+          calls: [],
+          qualifiedCalls: []
         };
         if (lang === "dart" && node.type.endsWith("_signature")) {
           const init2 = node.nextNamedSibling;
@@ -12195,6 +12216,7 @@ async function parseSource(content, lang) {
         }
         symbols.push(sym);
         symbolCalls.set(sym, /* @__PURE__ */ new Set());
+        symbolQualified.set(sym, /* @__PURE__ */ new Set());
         nextOwner = sym;
         if (CONTAINER_KINDS.has(k)) nextContainer = name.replace(/^.* for /, "");
       }
@@ -12206,8 +12228,11 @@ async function parseSource(content, lang) {
           const s = firstString(node.childForFieldName("arguments") ?? node);
           if (s) imports.add(callee === "require_relative" && !s.startsWith(".") ? `./${s}` : s);
         } else if (callee.length > 1) {
-          if (owner) symbolCalls.get(owner).add(callee);
-          else topCalls.add(callee);
+          if (owner) {
+            symbolCalls.get(owner).add(callee);
+            const receiver = lang === "dart" ? null : receiverOf(node, container);
+            if (receiver) symbolQualified.get(owner).add(`${receiver}.${callee}`);
+          } else topCalls.add(callee);
         }
       }
     }
@@ -12225,21 +12250,230 @@ async function parseSource(content, lang) {
   for (const [sym, calls] of symbolCalls) {
     calls.delete(sym.name);
     sym.calls = [...calls].slice(0, 200);
+    sym.qualifiedCalls = [...symbolQualified.get(sym) ?? []].filter((q) => !q.endsWith(`.${sym.name}`) || !q.startsWith(`${sym.parent}.`)).slice(0, 200);
   }
   symbols.sort((a, b) => a.start - b.start || b.end - a.end);
   return { symbols, imports: [...imports].slice(0, 300), topLevelCalls: [...topCalls].slice(0, 200) };
 }
 
+// src/graph/search.ts
+import { existsSync as existsSync3, mkdirSync, readFileSync as readFileSync2, writeFileSync } from "node:fs";
+import { join as join3 } from "node:path";
+var MAX_CHUNK_LINES = 120;
+var WINDOW = 60;
+function chunkSpans(symbols, lines) {
+  const spans = [];
+  if (symbols.length) {
+    for (const s of symbols) {
+      const len = s.end - s.start + 1;
+      if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
+        spans.push({ start: s.start, end: s.start + 25, name: s.name, kind: s.kind });
+      } else {
+        spans.push({ start: s.start, end: Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), name: s.name, kind: s.kind });
+      }
+    }
+    const first = Math.min(...symbols.map((s) => s.start));
+    if (first > 3) spans.push({ start: 1, end: Math.min(first - 1, WINDOW) });
+  } else {
+    for (let start2 = 1, n = 0; start2 <= lines && n < 10; start2 += WINDOW, n++) {
+      spans.push({ start: start2, end: Math.min(lines, start2 + WINDOW - 1) });
+    }
+  }
+  return spans;
+}
+function chunkText(path2, content, c) {
+  const code = lineSlice(content, c.start, c.end);
+  if (!code.trim()) return null;
+  return `${path2}:${c.start}-${c.end}${c.name ? ` ${c.kind} ${c.name}` : ""}
+${code}`;
+}
+function chunkFile(path2, content, lines, symbols) {
+  const out2 = [];
+  for (const span of chunkSpans(symbols, lines)) {
+    const text = chunkText(path2, content, span);
+    if (text == null) continue;
+    const terms = tokenize(`${path2} ${span.name ?? ""} ${text}`);
+    const tf = {};
+    for (const t of terms) tf[t] = (tf[t] ?? 0) + 1;
+    out2.push({ ...span, hash: sha1(text), len: terms.length, tf });
+  }
+  return out2;
+}
+function buildChunks(graph) {
+  const chunks = [];
+  for (const f of Object.values(graph.data.files)) {
+    for (const c of f.chunks ?? []) chunks.push({ ...c, id: `${f.path}:${c.start}-${c.end}`, path: f.path });
+  }
+  return chunks;
+}
+function readChunkText(graph, c) {
+  const content = graph.read(c.path);
+  return content == null ? null : chunkText(c.path, content, c);
+}
+var EmbeddingStore = class {
+  constructor(dir, model) {
+    this.dir = dir;
+    this.model = model;
+  }
+  dir;
+  model;
+  vectors = /* @__PURE__ */ new Map();
+  dims = 0;
+  base() {
+    return join3(this.dir, `emb-${this.model.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
+  }
+  load() {
+    const meta = `${this.base()}.json`;
+    const bin = `${this.base()}.bin`;
+    if (!existsSync3(meta) || !existsSync3(bin)) return;
+    try {
+      const { dims, hashes } = JSON.parse(readFileSync2(meta, "utf8"));
+      const buf = readFileSync2(bin);
+      const all = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+      this.dims = dims;
+      hashes.forEach((h, i) => this.vectors.set(h, all.slice(i * dims, (i + 1) * dims)));
+      log.info(`Loaded ${hashes.length} cached embeddings`);
+    } catch (e) {
+      log.warn(`Could not load embedding cache: ${e.message}`);
+    }
+  }
+  /** Persist only vectors still referenced by current chunks (prunes stale ones). */
+  save(keep) {
+    if (!this.dims) return;
+    mkdirSync(this.dir, { recursive: true });
+    const hashes = [...this.vectors.keys()].filter((h) => keep.has(h));
+    const all = new Float32Array(hashes.length * this.dims);
+    hashes.forEach((h, i) => all.set(this.vectors.get(h), i * this.dims));
+    writeFileSync(`${this.base()}.bin`, Buffer.from(all.buffer));
+    writeFileSync(`${this.base()}.json`, JSON.stringify({ model: this.model, dims: this.dims, hashes }));
+  }
+};
+var Searcher = class {
+  constructor(chunks, embedder = null, store = null, opts = {}) {
+    this.chunks = chunks;
+    this.embedder = embedder;
+    this.store = store;
+    this.textOf = opts.textOf ?? (() => null);
+    chunks.forEach((c, i) => {
+      this.docLen[i] = c.len;
+      for (const [t, n] of Object.entries(c.tf)) (this.postings.get(t) ?? this.postings.set(t, []).get(t)).push({ doc: i, tf: n });
+    });
+    this.avgLen = this.docLen.reduce((a, b) => a + b, 0) / Math.max(1, chunks.length);
+  }
+  chunks;
+  embedder;
+  store;
+  postings = /* @__PURE__ */ new Map();
+  docLen = [];
+  avgLen = 1;
+  textOf;
+  get hasEmbeddings() {
+    return !!(this.embedder && this.store && this.store.vectors.size);
+  }
+  /** Embed chunks that are not cached yet. Returns number of new embeddings. */
+  async ensureEmbeddings(maxChunks) {
+    if (!this.embedder || !this.store) return 0;
+    const missing = [];
+    for (const c of this.chunks) {
+      if (missing.length >= maxChunks) break;
+      if (this.store.vectors.has(c.hash)) continue;
+      const text = this.textOf(c);
+      if (text != null) missing.push({ chunk: c, text });
+    }
+    if (!missing.length) return 0;
+    log.info(`Embedding ${missing.length} new code chunks with ${this.embedder.model}\u2026`);
+    const bs = this.embedder.batchSize;
+    const batches = [];
+    for (let i = 0; i < missing.length; i += bs) batches.push(missing.slice(i, i + bs));
+    let done = 0;
+    try {
+      await mapLimit(batches, 3, async (batch) => {
+        const vecs = await this.embedder.embed(batch.map((m) => m.text));
+        vecs.forEach((v, i) => {
+          this.store.vectors.set(batch[i].chunk.hash, Float32Array.from(normalize(v)));
+          this.store.dims = v.length;
+        });
+        done += batch.length;
+      });
+    } catch (e) {
+      log.warn(`Embedding failed after ${done} chunks (${e.message}); continuing with keyword search`);
+    }
+    return done;
+  }
+  persistEmbeddings() {
+    this.store?.save(new Set(this.chunks.map((c) => c.hash)));
+  }
+  bm25(query, k, filter2) {
+    const terms = [...new Set(tokenize(query))];
+    const N = this.chunks.length;
+    const scores = /* @__PURE__ */ new Map();
+    const k1 = 1.2;
+    const b = 0.75;
+    for (const t of terms) {
+      const post = this.postings.get(t);
+      if (!post || post.length > N * 0.5) continue;
+      const idf = Math.log(1 + (N - post.length + 0.5) / (post.length + 0.5));
+      for (const { doc, tf } of post) {
+        const s = idf * (tf * (k1 + 1) / (tf + k1 * (1 - b + b * this.docLen[doc] / this.avgLen)));
+        scores.set(doc, (scores.get(doc) ?? 0) + s);
+      }
+    }
+    return [...scores.entries()].filter(([d]) => !filter2 || filter2(this.chunks[d])).sort((x, y) => y[1] - x[1]).slice(0, k).map(([d, s]) => ({ chunk: this.chunks[d], score: s }));
+  }
+  async vector(query, k, filter2) {
+    if (!this.hasEmbeddings) return [];
+    let q;
+    try {
+      q = normalize((await this.embedder.embed([query]))[0]);
+    } catch (e) {
+      log.warn(`Query embedding failed: ${e.message}`);
+      return [];
+    }
+    const hits = [];
+    for (const c of this.chunks) {
+      if (filter2 && !filter2(c)) continue;
+      const v = this.store.vectors.get(c.hash);
+      if (!v || v.length !== q.length) continue;
+      let dot = 0;
+      for (let i = 0; i < q.length; i++) dot += q[i] * v[i];
+      hits.push({ chunk: c, score: dot });
+    }
+    return hits.sort((a, b) => b.score - a.score).slice(0, k);
+  }
+  /** Hybrid search with reciprocal-rank fusion. */
+  async search(query, k = 8, filter2) {
+    const [lex, vec] = await Promise.all([
+      Promise.resolve(this.bm25(query, k * 3, filter2)),
+      this.vector(query, k * 3, filter2)
+    ]);
+    const fused = /* @__PURE__ */ new Map();
+    const add = (list, weight) => list.forEach((h, rank) => {
+      const cur = fused.get(h.chunk.id) ?? { chunk: h.chunk, score: 0 };
+      cur.score += weight / (60 + rank);
+      fused.set(h.chunk.id, cur);
+    });
+    add(lex, 1);
+    add(vec, 1.2);
+    return [...fused.values()].sort((a, b) => b.score - a.score).slice(0, k);
+  }
+};
+function normalize(v) {
+  let n = 0;
+  for (const x of v) n += x * x;
+  n = Math.sqrt(n) || 1;
+  return v.map((x) => x / n);
+}
+
 // src/graph/indexer.ts
-var INDEX_VERSION = 3;
+var INDEX_VERSION = 4;
 function indexFile(dir) {
-  return join3(dir, "index.json.gz");
+  return join4(dir, "index.json.gz");
 }
 function loadIndex(dir) {
   const f = indexFile(dir);
-  if (!existsSync3(f)) return null;
+  if (!existsSync4(f)) return null;
   try {
-    const data = JSON.parse(gunzipSync(readFileSync2(f)).toString("utf8"));
+    const data = JSON.parse(gunzipSync(readFileSync3(f)).toString("utf8"));
     if (data.version !== INDEX_VERSION) {
       log.info(`Index version changed (${data.version} \u2192 ${INDEX_VERSION}); rebuilding`);
       return null;
@@ -12251,10 +12485,10 @@ function loadIndex(dir) {
   }
 }
 function saveIndex(dir, data) {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(indexFile(dir), gzipSync(JSON.stringify(data)));
-  const gi = join3(dir, ".gitignore");
-  if (!existsSync3(gi)) writeFileSync(gi, "*\n");
+  mkdirSync2(dir, { recursive: true });
+  writeFileSync2(indexFile(dir), gzipSync(JSON.stringify(data)));
+  const gi = join4(dir, ".gitignore");
+  if (!existsSync4(gi)) writeFileSync2(gi, "*\n");
 }
 function listRepoFiles(root) {
   try {
@@ -12267,10 +12501,10 @@ function listRepoFiles(root) {
     log.warn("git ls-files failed; walking the directory instead");
     const out2 = [];
     const walk = (rel) => {
-      for (const name of readdirSync(join3(root, rel))) {
+      for (const name of readdirSync(join4(root, rel))) {
         if (name === ".git" || name === "node_modules" || name === ".amchi") continue;
         const r = rel ? `${rel}/${name}` : name;
-        const st = lstatSync(join3(root, r));
+        const st = lstatSync(join4(root, r));
         if (st.isDirectory()) walk(r);
         else if (st.isFile()) out2.push(r);
       }
@@ -12284,6 +12518,30 @@ function shouldIndex(path2, cfg) {
   if (!isIndexableText(path2)) return false;
   return !matchesAny(path2, [...DEFAULT_IGNORE, ...cfg.index.ignore]);
 }
+function workingTreeChanges(git) {
+  let out2;
+  try {
+    out2 = git.run(["status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"]);
+  } catch {
+    return null;
+  }
+  const paths = /* @__PURE__ */ new Set();
+  for (const entry of out2.split("\0")) if (entry.length > 3) paths.add(entry.slice(3));
+  return paths;
+}
+function changedSince(git, prev) {
+  if (!prev?.commit || prev.dirty || !git.hasCommit(prev.commit)) return null;
+  let diff;
+  try {
+    diff = git.run(["diff", "--name-only", "-z", "--no-renames", prev.commit, "HEAD"]);
+  } catch {
+    return null;
+  }
+  const status = workingTreeChanges(git);
+  if (!status) return null;
+  for (const p of diff.split("\0")) if (p) status.add(p);
+  return status;
+}
 async function buildIndex(root, cfg, prev, commit) {
   const t0 = Date.now();
   let paths = listRepoFiles(root).filter((p) => shouldIndex(p, cfg));
@@ -12294,21 +12552,33 @@ async function buildIndex(root, cfg, prev, commit) {
   const files = {};
   let parsed = 0;
   let reused = 0;
+  let unread = 0;
   const maxBytes = cfg.index.max_file_kb * 1024;
+  const git = new Git(root);
+  const head = commit ?? git.revParse("HEAD") ?? void 0;
+  const changed = changedSince(git, prev);
+  const wtChanges = workingTreeChanges(git);
+  const dirty = wtChanges === null ? true : wtChanges.size > 0;
   for (const path2 of paths) {
-    const abs = join3(root, path2);
+    const old = prev?.files[path2];
+    if (old && changed && !changed.has(path2)) {
+      files[path2] = { ...old, resolved: [] };
+      reused++;
+      unread++;
+      continue;
+    }
+    const abs = join4(root, path2);
     let buf;
     try {
       const st = lstatSync(abs);
       if (!st.isFile() || st.size > maxBytes) continue;
-      buf = readFileSync2(abs);
+      buf = readFileSync3(abs);
     } catch {
       continue;
     }
     if (buf.subarray(0, 8e3).includes(0)) continue;
     const content = buf.toString("utf8");
     const hash = sha1(content);
-    const old = prev?.files[path2];
     if (old && old.hash === hash) {
       files[path2] = { ...old, resolved: [] };
       reused++;
@@ -12323,7 +12593,8 @@ async function buildIndex(root, cfg, prev, commit) {
       symbols: [],
       imports: [],
       resolved: [],
-      topLevelCalls: []
+      topLevelCalls: [],
+      chunks: []
     };
     if (lang) {
       const p = await parseSource(content, lang);
@@ -12333,16 +12604,17 @@ async function buildIndex(root, cfg, prev, commit) {
         entry.topLevelCalls = p.topLevelCalls;
       }
     }
+    entry.chunks = chunkFile(path2, content, entry.lines, entry.symbols);
     files[path2] = entry;
     parsed++;
   }
   let goModule;
   let dartPackage;
-  if (existsSync3(join3(root, "pubspec.yaml"))) {
-    dartPackage = readFileSync2(join3(root, "pubspec.yaml"), "utf8").match(/^name:\s*["']?([\w-]+)/m)?.[1];
+  if (existsSync4(join4(root, "pubspec.yaml"))) {
+    dartPackage = readFileSync3(join4(root, "pubspec.yaml"), "utf8").match(/^name:\s*["']?([\w-]+)/m)?.[1];
   }
   try {
-    goModule = readFileSync2(join3(root, "go.mod"), "utf8").match(/^module\s+(\S+)/m)?.[1];
+    goModule = readFileSync3(join4(root, "go.mod"), "utf8").match(/^module\s+(\S+)/m)?.[1];
   } catch {
   }
   const resolver = new ImportResolver(Object.keys(files), goModule, dartPackage);
@@ -12350,10 +12622,10 @@ async function buildIndex(root, cfg, prev, commit) {
     f.resolved = [...new Set(f.imports.map((i) => resolver.resolve(f.path, i, f.lang)).filter(Boolean))];
   }
   const removed = prev ? Object.keys(prev.files).filter((p) => !files[p]).length : 0;
-  const data = { version: INDEX_VERSION, commit, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), files };
-  const stats = { total: Object.keys(files).length, parsed, reused, removed, ms: Date.now() - t0 };
+  const data = { version: INDEX_VERSION, commit: head, dirty, updatedAt: (/* @__PURE__ */ new Date()).toISOString(), files };
+  const stats = { total: Object.keys(files).length, parsed, reused, unread, removed, ms: Date.now() - t0 };
   log.info(
-    `Indexed ${stats.total} files (${parsed} parsed, ${reused} cached, ${removed} removed) in ${(stats.ms / 1e3).toFixed(1)}s`
+    `Indexed ${stats.total} files (${parsed} parsed, ${reused} cached${unread ? `, ${unread} not read` : ""}, ${removed} removed) in ${(stats.ms / 1e3).toFixed(1)}s`
   );
   return { data, stats };
 }
@@ -12505,6 +12777,7 @@ var CodeGraph = class {
       for (const s of f.symbols) {
         push(this.defsByName, s.name, { path: f.path, symbol: s });
         for (const c of s.calls) push(this.callersByName, c, { path: f.path, symbol: s });
+        for (const q of s.qualifiedCalls ?? []) push(this.callersByQualified, q, { path: f.path, symbol: s });
       }
       for (const r of f.resolved) {
         (this.importers.get(r) ?? this.importers.set(r, /* @__PURE__ */ new Set()).get(r)).add(f.path);
@@ -12515,6 +12788,8 @@ var CodeGraph = class {
   data;
   defsByName = /* @__PURE__ */ new Map();
   callersByName = /* @__PURE__ */ new Map();
+  /** "Class.method" -> symbols that call it on that class (see SymbolInfo.qualifiedCalls). */
+  callersByQualified = /* @__PURE__ */ new Map();
   importers = /* @__PURE__ */ new Map();
   contentCache = /* @__PURE__ */ new Map();
   file(path2) {
@@ -12524,8 +12799,8 @@ var CodeGraph = class {
     if (this.contentCache.has(path2)) return this.contentCache.get(path2);
     let c = null;
     try {
-      if (!this.data.files[path2] && lstatSync(join3(this.root, path2)).isSymbolicLink()) throw new Error("symlink");
-      c = readFileSync2(join3(this.root, path2), "utf8");
+      if (!this.data.files[path2] && lstatSync(join4(this.root, path2)).isSymbolicLink()) throw new Error("symlink");
+      c = readFileSync3(join4(this.root, path2), "utf8");
     } catch {
       c = null;
     }
@@ -12565,6 +12840,34 @@ var CodeGraph = class {
   }
   callersOf(name) {
     return this.callersByName.get(name) ?? [];
+  }
+  /**
+   * Callers of `sym` with class-aware filtering. Name-based callers that are known
+   * to target the same method name on a *different* class are dropped, and callers
+   * that name this class explicitly are added even when import resolution missed
+   * them. For symbols without a parent this is plain `callersOf`.
+   */
+  callersOfSymbol(sym, keep = () => true) {
+    const name = sym.name;
+    const parent = sym.parent;
+    const mine = parent ? `${parent}.${name}` : null;
+    const targetsOtherClass = (c) => {
+      if (!mine) return false;
+      const q = (c.symbol.qualifiedCalls ?? []).filter((x) => x.endsWith(`.${name}`));
+      return q.length > 0 && !q.includes(mine);
+    };
+    const out2 = [];
+    const seen = /* @__PURE__ */ new Set();
+    const add = (c) => {
+      const key = `${c.path}:${c.symbol.start}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out2.push(c);
+      }
+    };
+    if (mine) for (const c of this.callersByQualified.get(mine) ?? []) add(c);
+    for (const c of this.callersOf(name)) if (keep(c) && !targetsOtherClass(c)) add(c);
+    return out2;
   }
   importersOf(path2) {
     return [...this.importers.get(path2) ?? []];
@@ -12619,192 +12922,6 @@ function push(m, k, v) {
   } else m.set(k, [v]);
 }
 
-// src/graph/search.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
-var MAX_CHUNK_LINES = 120;
-var WINDOW = 60;
-function buildChunks(graph) {
-  const chunks = [];
-  for (const f of Object.values(graph.data.files)) {
-    const content = graph.read(f.path);
-    if (content == null) continue;
-    const add = (start2, end, name, kind) => {
-      const code = lineSlice(content, start2, end);
-      if (!code.trim()) return;
-      const header = `${f.path}:${start2}-${end}${name ? ` ${kind} ${name}` : ""}`;
-      const text = `${header}
-${code}`;
-      chunks.push({ id: `${f.path}:${start2}-${end}`, path: f.path, start: start2, end, name, kind, text, hash: sha1(text) });
-    };
-    if (f.symbols.length) {
-      for (const s of f.symbols) {
-        const len = s.end - s.start + 1;
-        if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
-          add(s.start, s.start + 25, s.name, s.kind);
-        } else {
-          add(s.start, Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), s.name, s.kind);
-        }
-      }
-      const first = Math.min(...f.symbols.map((s) => s.start));
-      if (first > 3) add(1, Math.min(first - 1, WINDOW));
-    } else {
-      for (let start2 = 1, n = 0; start2 <= f.lines && n < 10; start2 += WINDOW, n++) {
-        add(start2, Math.min(f.lines, start2 + WINDOW - 1));
-      }
-    }
-  }
-  return chunks;
-}
-var EmbeddingStore = class {
-  constructor(dir, model) {
-    this.dir = dir;
-    this.model = model;
-  }
-  dir;
-  model;
-  vectors = /* @__PURE__ */ new Map();
-  dims = 0;
-  base() {
-    return join4(this.dir, `emb-${this.model.replace(/[^a-zA-Z0-9._-]/g, "_")}`);
-  }
-  load() {
-    const meta = `${this.base()}.json`;
-    const bin = `${this.base()}.bin`;
-    if (!existsSync4(meta) || !existsSync4(bin)) return;
-    try {
-      const { dims, hashes } = JSON.parse(readFileSync3(meta, "utf8"));
-      const buf = readFileSync3(bin);
-      const all = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-      this.dims = dims;
-      hashes.forEach((h, i) => this.vectors.set(h, all.slice(i * dims, (i + 1) * dims)));
-      log.info(`Loaded ${hashes.length} cached embeddings`);
-    } catch (e) {
-      log.warn(`Could not load embedding cache: ${e.message}`);
-    }
-  }
-  /** Persist only vectors still referenced by current chunks (prunes stale ones). */
-  save(keep) {
-    if (!this.dims) return;
-    mkdirSync2(this.dir, { recursive: true });
-    const hashes = [...this.vectors.keys()].filter((h) => keep.has(h));
-    const all = new Float32Array(hashes.length * this.dims);
-    hashes.forEach((h, i) => all.set(this.vectors.get(h), i * this.dims));
-    writeFileSync2(`${this.base()}.bin`, Buffer.from(all.buffer));
-    writeFileSync2(`${this.base()}.json`, JSON.stringify({ model: this.model, dims: this.dims, hashes }));
-  }
-};
-var Searcher = class {
-  constructor(chunks, embedder = null, store = null) {
-    this.chunks = chunks;
-    this.embedder = embedder;
-    this.store = store;
-    chunks.forEach((c, i) => {
-      const terms = tokenize(`${c.path} ${c.name ?? ""} ${c.text}`);
-      this.docLen[i] = terms.length;
-      const tf = /* @__PURE__ */ new Map();
-      for (const t of terms) tf.set(t, (tf.get(t) ?? 0) + 1);
-      for (const [t, n] of tf) (this.postings.get(t) ?? this.postings.set(t, []).get(t)).push({ doc: i, tf: n });
-    });
-    this.avgLen = this.docLen.reduce((a, b) => a + b, 0) / Math.max(1, chunks.length);
-  }
-  chunks;
-  embedder;
-  store;
-  postings = /* @__PURE__ */ new Map();
-  docLen = [];
-  avgLen = 1;
-  get hasEmbeddings() {
-    return !!(this.embedder && this.store && this.store.vectors.size);
-  }
-  /** Embed chunks that are not cached yet. Returns number of new embeddings. */
-  async ensureEmbeddings(maxChunks) {
-    if (!this.embedder || !this.store) return 0;
-    const missing = this.chunks.filter((c) => !this.store.vectors.has(c.hash)).slice(0, maxChunks);
-    if (!missing.length) return 0;
-    log.info(`Embedding ${missing.length} new code chunks with ${this.embedder.model}\u2026`);
-    const bs = this.embedder.batchSize;
-    const batches = [];
-    for (let i = 0; i < missing.length; i += bs) batches.push(missing.slice(i, i + bs));
-    let done = 0;
-    try {
-      await mapLimit(batches, 3, async (batch) => {
-        const vecs = await this.embedder.embed(batch.map((c) => c.text));
-        vecs.forEach((v, i) => {
-          this.store.vectors.set(batch[i].hash, Float32Array.from(normalize(v)));
-          this.store.dims = v.length;
-        });
-        done += batch.length;
-      });
-    } catch (e) {
-      log.warn(`Embedding failed after ${done} chunks (${e.message}); continuing with keyword search`);
-    }
-    return done;
-  }
-  persistEmbeddings() {
-    this.store?.save(new Set(this.chunks.map((c) => c.hash)));
-  }
-  bm25(query, k, filter2) {
-    const terms = [...new Set(tokenize(query))];
-    const N = this.chunks.length;
-    const scores = /* @__PURE__ */ new Map();
-    const k1 = 1.2;
-    const b = 0.75;
-    for (const t of terms) {
-      const post = this.postings.get(t);
-      if (!post || post.length > N * 0.5) continue;
-      const idf = Math.log(1 + (N - post.length + 0.5) / (post.length + 0.5));
-      for (const { doc, tf } of post) {
-        const s = idf * (tf * (k1 + 1) / (tf + k1 * (1 - b + b * this.docLen[doc] / this.avgLen)));
-        scores.set(doc, (scores.get(doc) ?? 0) + s);
-      }
-    }
-    return [...scores.entries()].filter(([d]) => !filter2 || filter2(this.chunks[d])).sort((a, b2) => b2[1] - a[1]).slice(0, k).map(([d, s]) => ({ chunk: this.chunks[d], score: s }));
-  }
-  async vector(query, k, filter2) {
-    if (!this.hasEmbeddings) return [];
-    let q;
-    try {
-      q = normalize((await this.embedder.embed([query]))[0]);
-    } catch (e) {
-      log.warn(`Query embedding failed: ${e.message}`);
-      return [];
-    }
-    const hits = [];
-    for (const c of this.chunks) {
-      if (filter2 && !filter2(c)) continue;
-      const v = this.store.vectors.get(c.hash);
-      if (!v || v.length !== q.length) continue;
-      let dot = 0;
-      for (let i = 0; i < q.length; i++) dot += q[i] * v[i];
-      hits.push({ chunk: c, score: dot });
-    }
-    return hits.sort((a, b) => b.score - a.score).slice(0, k);
-  }
-  /** Hybrid search with reciprocal-rank fusion. */
-  async search(query, k = 8, filter2) {
-    const [lex, vec] = await Promise.all([
-      Promise.resolve(this.bm25(query, k * 3, filter2)),
-      this.vector(query, k * 3, filter2)
-    ]);
-    const fused = /* @__PURE__ */ new Map();
-    const add = (list, weight) => list.forEach((h, rank) => {
-      const cur = fused.get(h.chunk.id) ?? { chunk: h.chunk, score: 0 };
-      cur.score += weight / (60 + rank);
-      fused.set(h.chunk.id, cur);
-    });
-    add(lex, 1);
-    add(vec, 1.2);
-    return [...fused.values()].sort((a, b) => b.score - a.score).slice(0, k);
-  }
-};
-function normalize(v) {
-  let n = 0;
-  for (const x of v) n += x * x;
-  n = Math.sqrt(n) || 1;
-  return v.map((x) => x / n);
-}
-
 // src/graph/workspace.ts
 async function openWorkspace(root, cfg, embedder, opts = {}) {
   const dir = isAbsolute2(cfg.index.dir) ? cfg.index.dir : join5(root, cfg.index.dir);
@@ -12819,7 +12936,7 @@ async function openWorkspace(root, cfg, embedder, opts = {}) {
     store = new EmbeddingStore(dir, `${embedder.provider}-${embedder.model}`);
     store.load();
   }
-  const searcher = new Searcher(chunks, embedder, store);
+  const searcher = new Searcher(chunks, embedder, store, { textOf: (c) => readChunkText(graph, c) });
   if (embedder) {
     const added = await searcher.ensureEmbeddings(opts.maxEmbedChunks ?? 3e4);
     if (added) searcher.persistEmbeddings();
@@ -13184,7 +13301,7 @@ var MockEmbedder = class {
   batchSize = 256;
   async embed(texts) {
     return texts.map((t) => {
-      const v = new Array(64).fill(0);
+      const v = Array.from({ length: 64 }, () => 0);
       for (const tok of tokenize(t)) {
         let h = 2166136261;
         for (let i = 0; i < tok.length; i++) h = Math.imul(h ^ tok.charCodeAt(i), 16777619);
@@ -13421,16 +13538,17 @@ function renderInlineComment(f, opts = {}) {
   parts.push("", FP_MARKER(f.fingerprint));
   return parts.join("\n");
 }
-function encodeState(s) {
+var MAX_COMMENT_CHARS = 65e3;
+function encodeState(s, budget = { fileChars: 2e4, summaryChars: 300, issues: 500 }) {
   const files = {};
   let size = 0;
   for (const [k, v] of Object.entries(s.files ?? {})) {
-    const add = k.length + v.length + 8;
-    if (size + add > 2e4) break;
-    files[k] = v.slice(0, 300);
+    const add = k.length + Math.min(v.length, budget.summaryChars) + 8;
+    if (size + add > budget.fileChars) break;
+    files[k] = v.slice(0, budget.summaryChars);
     size += add;
   }
-  const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-500));
+  const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-budget.issues));
   const pending = s.pending?.length ? s.pending.slice(0, 200) : void 0;
   return JSON.stringify({ ...s, files, issues, pending }).replace(/--/g, "&#45;&#45;");
 }
@@ -13448,6 +13566,12 @@ function riskLabel(confidence) {
   return "Very high risk";
 }
 function renderSummary(out2, meta, state, opts = {}) {
+  for (let level = 0; ; level++) {
+    const md = buildSummary(out2, meta, state, opts, level);
+    if (md.length <= MAX_COMMENT_CHARS || level >= 3) return md;
+  }
+}
+function buildSummary(out2, meta, state, opts, level) {
   const L = [SUMMARY_MARKER];
   const s = out2.summary;
   if (s) {
@@ -13455,7 +13579,7 @@ function renderSummary(out2, meta, state, opts = {}) {
     const overview = s.overview.trim();
     L.push(`**[${riskLabel(s.confidence)}]** ${overview}`, "");
     if (s.confidence_reason) L.push(s.confidence_reason.trim(), "");
-    if (s.key_changes.length) {
+    if (s.key_changes.length && level < 3) {
       L.push("<details>", "<summary>Key changes</summary>", "");
       for (const k of s.key_changes) L.push(`- ${k}`);
       L.push("", "</details>", "");
@@ -13463,17 +13587,19 @@ function renderSummary(out2, meta, state, opts = {}) {
   } else {
     L.push("## Code review", "");
   }
-  const issues = { ...state.issues ?? {} };
+  const issues = { ...state.issues };
   const current = [...out2.inline, ...out2.outside].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
   const newCount = current.filter((f) => !issues[f.fingerprint]).length;
   for (const f of current) issues[f.fingerprint] = f.severity;
   L.push("## Findings", "");
   if (current.length) {
-    current.forEach((f, i) => {
+    const listed = level >= 3 ? current.slice(0, 30) : current;
+    listed.forEach((f, i) => {
       const url = meta.commentUrls?.[f.fingerprint];
       const where = url ? ` [\u25B6](${url})` : ` <sub>\`${location(f)}\`</sub>`;
       L.push(`${i + 1}. ${badge(f.severity, opts.badges)} **${escapeInline(f.title)}**${where}`);
     });
+    if (listed.length < current.length) L.push(`${listed.length + 1}. \u2026 and ${current.length - listed.length} more (see the inline comments)`);
     L.push("");
     const counts = /* @__PURE__ */ new Map();
     for (const sev of Object.values(issues)) counts.set(sev, (counts.get(sev) ?? 0) + 1);
@@ -13482,23 +13608,27 @@ function renderSummary(out2, meta, state, opts = {}) {
     if (meta.incrementalFrom && total > current.length) {
       L.push(`<sub>${newCount} new in this update \xB7 ${total} total on this PR (${countText})</sub>`, "");
     }
-    L.push("<details>", "<summary>Fix with agent prompt</summary>", "", fence(fixAllPrompt(current), "markdown"), "", "</details>", "");
+    if (level < 2) {
+      const prompt = level === 0 ? current : current.map((f) => ({ ...f, body: f.body.slice(0, 300), suggestion: void 0 }));
+      L.push("<details>", "<summary>Fix with agent prompt</summary>", "", fence(fixAllPrompt(prompt), "markdown"), "", "</details>", "");
+    }
   } else {
     L.push("No issues found. \u{1F389}", "");
   }
-  if (s?.diagram) {
+  if (s?.diagram && level < 3) {
     L.push("<details><summary>\u{1F4CA} Sequence diagram</summary>", "", "```mermaid", s.diagram, "```", "", "</details>", "");
   }
-  const fileSummaries = { ...state.files ?? {}, ...out2.fileSummaries };
+  const fileSummaries = level >= 2 ? { ...out2.fileSummaries } : { ...state.files, ...out2.fileSummaries };
   const files = meta.allFiles;
-  if (files.length) {
+  const tableRows = level === 0 ? 120 : level === 1 ? 40 : 0;
+  if (files.length && tableRows) {
     L.push(`<details><summary>\u{1F4C2} Files changed (${files.length})</summary>`, "", "| File | Changes | Summary |", "| --- | --- | --- |");
-    for (const f of files.slice(0, 120)) {
+    for (const f of files.slice(0, tableRows)) {
       const skip = out2.skipped.find((x) => x.path === f.path);
       const sum = fileSummaries[f.path] ?? (skip ? `_skipped: ${skip.reason}_` : f.status === "deleted" ? "_deleted_" : "");
       L.push(`| \`${cell(f.path)}\` | +${f.additions} / -${f.deletions} | ${cell(sum)} |`);
     }
-    if (files.length > 120) L.push(`| \u2026 | | ${files.length - 120} more files |`);
+    if (files.length > tableRows) L.push(`| \u2026 | | ${files.length - tableRows} more files |`);
     L.push("", "</details>", "");
   }
   const notes = [];
@@ -13520,8 +13650,9 @@ function renderSummary(out2, meta, state, opts = {}) {
   );
   const complete = !out2.failed.length && !out2.budgetHit && !out2.deadlineHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  const pending = complete ? [] : [...out2.failed, ...out2.skipped.filter((s2) => /deadline|budget/.test(s2.reason)).map((s2) => s2.path)];
-  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
+  const pending = complete ? [] : [...out2.failed, ...out2.skipped.filter((x) => /deadline|budget/.test(x.reason)).map((x) => x.path)];
+  const budget = level === 0 ? void 0 : level === 1 ? { fileChars: 8e3, summaryChars: 120, issues: 500 } : { fileChars: 2e3, summaryChars: 80, issues: 200 };
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending }, budget)} -->`);
   return L.join("\n");
 }
 function truncate(s, n) {
@@ -13814,7 +13945,7 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
       if (NO_CALLER_KINDS.has(sym.kind)) continue;
       if (COMMON_NAMES.has(sym.name)) continue;
       const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
-      const relevant = graph.callersOf(sym.name).filter((c) => !(c.path === path2 && c.symbol.start === sym.start)).filter((c) => unique || c.path === path2 || graph.dependsOn(c.path, path2));
+      const relevant = graph.callersOfSymbol(sym, (c) => unique || c.path === path2 || graph.dependsOn(c.path, path2)).filter((c) => !(c.path === path2 && c.symbol.start === sym.start));
       const callers = relevant.slice(0, RETRIEVAL.callersPerSymbol);
       if (!callers.length) continue;
       const parts = [];
@@ -13979,8 +14110,8 @@ function affinity(candidates, graph) {
         if (seen.has(sym.name) || COMMON_NAMES.has(sym.name)) continue;
         seen.add(sym.name);
         const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
-        for (const c of graph.callersOf(sym.name)) {
-          if (c.path !== f.path && paths.has(c.path) && (unique || graph.dependsOn(c.path, f.path))) union(f.path, c.path);
+        for (const c of graph.callersOfSymbol(sym, (x) => unique || graph.dependsOn(x.path, f.path))) {
+          if (c.path !== f.path && paths.has(c.path)) union(f.path, c.path);
         }
       }
     }
@@ -14026,17 +14157,10 @@ function planBatches(candidates, graph, maxDiffPerBatch, priority = /* @__PURE__
   flush();
   return batches;
 }
-async function reviewPullRequest(input) {
-  const { cfg, graph, searcher, llm, pr } = input;
+function selectFiles(files, cfg) {
   const skipped = [];
-  const failed = [];
-  let budgetHit = false;
-  let deadlineHit = false;
-  const timings = { context: 0, review: 0, verify: 0, summary: 0 };
-  const prPaths = new Set(input.files.map((f) => f.path));
-  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
   let candidates = [];
-  for (const f of input.files) {
+  for (const f of files) {
     if (f.binary) skipped.push({ path: f.path, reason: "binary" });
     else if (f.status === "deleted") skipped.push({ path: f.path, reason: "deleted" });
     else if (!isReviewable(f.path, cfg)) skipped.push({ path: f.path, reason: "ignored by config" });
@@ -14048,36 +14172,138 @@ async function reviewPullRequest(input) {
     for (const f of candidates.slice(cfg.review.max_files)) skipped.push({ path: f.path, reason: "max_files limit" });
     candidates = candidates.slice(0, cfg.review.max_files);
   }
-  const outside = [];
-  const goneFiles = (input.allFiles ?? input.files).filter((x) => x.status === "deleted" || x.status === "renamed" && x.oldPath).map((f) => ({ f, gone: f.status === "deleted" ? f.path : f.oldPath })).filter(({ gone }) => !graph.file(gone));
+  return { candidates, skipped };
+}
+function deletedImportFindings(files, graph) {
+  const out2 = [];
+  const goneFiles = files.filter((x) => x.status === "deleted" || x.status === "renamed" && x.oldPath).map((f) => ({ f, gone: f.status === "deleted" ? f.path : f.oldPath })).filter(({ gone }) => !graph.file(gone));
   const importersByGone = graph.importersOfMissingMany(goneFiles.map((g) => g.gone));
   for (const { f, gone } of goneFiles) {
     const importers = importersByGone.get(gone) ?? [];
-    if (importers.length) {
-      const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
-      outside.push({
-        path: importers[0],
-        line: 1,
-        severity: "high",
-        category: "breaking-change",
-        title,
-        body: `Still imported by: ${importers.slice(0, 8).map((p) => `\`${p}\``).join(", ")}`,
-        confidence: 0.9,
-        fingerprint: fingerprint(gone, title)
-      });
-    }
+    if (!importers.length) continue;
+    const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
+    out2.push({
+      path: importers[0],
+      line: 1,
+      severity: "high",
+      category: "breaking-change",
+      title,
+      body: `Still imported by: ${importers.slice(0, 8).map((p) => `\`${p}\``).join(", ")}`,
+      confidence: 0.9,
+      fingerprint: fingerprint(gone, title)
+    });
   }
+  return out2;
+}
+async function reviewBatch(batch, ctx) {
+  const { cfg, graph, searcher, llm } = ctx;
   const perCall = cfg.limits.max_input_tokens_per_call;
+  const ctxBudget = Math.max(
+    REVIEW.minContextTokens,
+    Math.floor((perCall - ctx.headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall / batch.files.length)
+  );
+  const parts = [ctx.header];
+  const rules = /* @__PURE__ */ new Map();
+  for (const f of batch.files) for (const r of rulesForPath(f.path, cfg)) rules.set(r.rule, r);
+  const rulesText = renderRules([...rules.values()]);
+  if (rulesText) parts.push(rulesText);
+  let contextMs = 0;
+  for (const f of batch.files) {
+    let fileCtx = "";
+    const tc = Date.now();
+    try {
+      fileCtx = await buildFileContext(f, graph, searcher, ctxBudget, ctx.prPaths);
+    } catch (e) {
+      log.warn(`Context retrieval failed for ${f.path}: ${e.message}`);
+    }
+    contextMs += Date.now() - tc;
+    parts.push(
+      `
+==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================
+## Diff
+\`\`\`diff
+${batch.diffs.get(f.path)}
+\`\`\`
+` + (fileCtx ? `
+## Repository context for ${f.path}
+${fileCtx}
+` : "")
+    );
+  }
+  parts.push(
+    `
+Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} above. Return a "files" entry for each of: ${batch.files.map((f) => f.path).join(", ")}.`
+  );
+  const prompt = parts.join("\n");
+  const result = { findings: [], fileSummaries: {}, prompt, contextMs, outcome: "ok" };
+  try {
+    const res = await llm.chat({
+      system: REVIEW_SYSTEM(cfg),
+      user: prompt,
+      json: true,
+      maxTokens: cfg.limits.max_output_tokens,
+      label: `review:${batch.files.map((f) => f.path).join(",")}`
+    });
+    const parsed = parseModelJson(res.text);
+    for (const s of parsed.files ?? []) if (s.path && s.summary) result.fileSummaries[s.path] = s.summary;
+    for (const rf of parsed.findings ?? []) {
+      const f = normalizeFinding(rf, batch.files);
+      if (f) result.findings.push(f);
+    }
+  } catch (e) {
+    if (e instanceof BudgetExceededError) result.outcome = "budget";
+    else if (e instanceof DeadlineExceededError) result.outcome = "deadline";
+    else result.outcome = "failed";
+    const what = result.outcome === "failed" ? `Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ` : "";
+    log.warn(`${what}${e.message}`);
+  }
+  return result;
+}
+function resolveFindings(findings, outside, anchorFiles, candidates, cfg) {
+  const byPath = new Map(candidates.map((f) => [f.path, f]));
+  const anchorByPath = new Map(anchorFiles.map((f) => [f.path, f]));
+  const inlineAll = [];
+  const unanchored = [...outside];
+  for (const finding of findings) {
+    const fd = anchorByPath.get(finding.path) ?? byPath.get(finding.path);
+    if (!fd) continue;
+    const anchored = anchor(finding, fd, cfg);
+    if (anchored) inlineAll.push(anchored);
+    else unanchored.push(finding);
+  }
+  const minSev = severityRank(cfg.review.min_severity);
+  const passes = (f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence;
+  const passing = dedupe(inlineAll).filter(passes);
+  passing.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || b.confidence - a.confidence);
+  const inline = passing.slice(0, cfg.review.max_comments);
+  return {
+    inline,
+    outside: dedupe(unanchored).filter(passes),
+    anchored: inlineAll.length,
+    passing: passing.length,
+    dropped: Math.max(0, inlineAll.length - inline.length)
+  };
+}
+async function reviewPullRequest(input) {
+  const { cfg, graph, searcher, llm, pr } = input;
+  const timings = { context: 0, review: 0, verify: 0, summary: 0 };
+  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
+  const { candidates, skipped } = selectFiles(input.files, cfg);
+  const deterministic = deletedImportFindings(input.allFiles ?? input.files, graph);
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + REVIEW.systemPromptTokens;
-  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * REVIEW.diffShareOfCall);
+  const maxDiffPerBatch = Math.floor((cfg.limits.max_input_tokens_per_call - headerTokens) * REVIEW.diffShareOfCall);
   const priority = new Set(input.priorityPaths ?? []);
   const batches = planBatches(candidates, graph, maxDiffPerBatch, priority);
   const carried = candidates.filter((f) => priority.has(f.path)).length;
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
-  const fileSummaries = { ...input.previousFileSummaries ?? {} };
+  const ctx = { cfg, graph, searcher, llm, header, headerTokens, prPaths: new Set(input.files.map((f) => f.path)) };
+  const fileSummaries = { ...input.previousFileSummaries };
   const raw = [];
   const batchPrompts = [];
+  const failed = [];
+  let budgetHit = false;
+  let deadlineHit = false;
   const t0 = Date.now();
   await mapLimit(batches, cfg.limits.concurrency, async (batch, bi) => {
     if (pastDeadline()) {
@@ -14085,70 +14311,19 @@ async function reviewPullRequest(input) {
       for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
       return;
     }
-    const ctxBudget = Math.max(
-      REVIEW.minContextTokens,
-      Math.floor((perCall - headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall / batch.files.length)
-    );
-    const parts = [header];
-    const rules = /* @__PURE__ */ new Map();
-    for (const f of batch.files) for (const r of rulesForPath(f.path, cfg)) rules.set(r.rule, r);
-    const rulesText = renderRules([...rules.values()]);
-    if (rulesText) parts.push(rulesText);
-    for (const f of batch.files) {
-      let ctx = "";
-      const tc = Date.now();
-      try {
-        ctx = await buildFileContext(f, graph, searcher, ctxBudget, prPaths);
-      } catch (e) {
-        log.warn(`Context retrieval failed for ${f.path}: ${e.message}`);
-      }
-      timings.context += Date.now() - tc;
-      parts.push(
-        `
-==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================
-## Diff
-\`\`\`diff
-${batch.diffs.get(f.path)}
-\`\`\`
-` + (ctx ? `
-## Repository context for ${f.path}
-${ctx}
-` : "")
-      );
-    }
-    parts.push(
-      `
-Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} above. Return a "files" entry for each of: ${batch.files.map((f) => f.path).join(", ")}.`
-    );
-    const user = parts.join("\n");
-    batchPrompts[bi] = user;
-    try {
-      const res = await llm.chat({
-        system: REVIEW_SYSTEM(cfg),
-        user,
-        json: true,
-        maxTokens: cfg.limits.max_output_tokens,
-        label: `review:${batch.files.map((f) => f.path).join(",")}`
-      });
-      const parsed = parseModelJson(res.text);
-      for (const s of parsed.files ?? []) if (s.path && s.summary) fileSummaries[s.path] = s.summary;
-      for (const rf of parsed.findings ?? []) {
-        const f = normalizeFinding(rf, batch.files);
-        if (f) raw.push({ finding: f, batch: bi });
-      }
-    } catch (e) {
-      if (e instanceof BudgetExceededError) {
-        budgetHit = true;
-        for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
-        log.warn(e.message);
-      } else if (e instanceof DeadlineExceededError) {
-        deadlineHit = true;
-        for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
-        log.warn(e.message);
-      } else {
-        failed.push(...batch.files.map((f) => f.path));
-        log.warn(`Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ${e.message}`);
-      }
+    const r = await reviewBatch(batch, ctx);
+    timings.context += r.contextMs;
+    batchPrompts[bi] = r.prompt;
+    Object.assign(fileSummaries, r.fileSummaries);
+    for (const finding of r.findings) raw.push({ finding, batch: bi });
+    if (r.outcome === "budget") {
+      budgetHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
+    } else if (r.outcome === "deadline") {
+      deadlineHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+    } else if (r.outcome === "failed") {
+      failed.push(...batch.files.map((f) => f.path));
     }
   });
   timings.review = Date.now() - t0;
@@ -14159,30 +14334,13 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
     ({ kept: findings, unverified } = await verifyFindings(llm, cfg, raw, batchPrompts));
     timings.verify = Date.now() - tv;
   }
-  const byPath = new Map(candidates.map((f) => [f.path, f]));
-  const anchorByPath = new Map((input.anchorFiles ?? []).map((f) => [f.path, f]));
-  const inlineAll = [];
-  for (const { finding } of findings) {
-    const fd = anchorByPath.get(finding.path) ?? byPath.get(finding.path);
-    if (!fd) continue;
-    const anchored = anchor(finding, fd, cfg);
-    if (anchored) inlineAll.push(anchored);
-    else outside.push(finding);
-  }
-  const minSev = severityRank(cfg.review.min_severity);
-  const passing = dedupe(inlineAll).filter(
-    (f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence
-  );
-  passing.sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || b.confidence - a.confidence);
-  const inline = passing.slice(0, cfg.review.max_comments);
-  const dropped = inlineAll.length - inline.length;
-  const outsideKept = dedupe(outside).filter((f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence);
+  const resolved = resolveFindings(findings.map((r) => r.finding), deterministic, input.anchorFiles ?? [], candidates, cfg);
   let summary = null;
   if (cfg.summary.enabled) {
     const ts = Date.now();
     try {
       const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + REVIEW.summaryGraceMs : void 0;
-      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
+      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, resolved.inline.concat(resolved.outside), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
       log.warn(`Summary generation failed: ${e.message}`);
@@ -14192,15 +14350,15 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
   const funnel = {
     raw: raw.length,
     verified: findings.length,
-    anchored: inlineAll.length,
-    passing: passing.length,
-    capped: inline.length
+    anchored: resolved.anchored,
+    passing: resolved.passing,
+    capped: resolved.inline.length
   };
   log.info(`Findings funnel: ${renderFunnel(funnel)} \xB7 timings: ${renderTimings(timings)}`);
   return {
-    inline,
-    outside: outsideKept,
-    dropped: Math.max(0, dropped),
+    inline: resolved.inline,
+    outside: resolved.outside,
+    dropped: resolved.dropped,
     fileSummaries,
     summary,
     reviewed: candidates.filter((f) => !failed.includes(f.path) && !skipped.some((s) => s.path === f.path)),

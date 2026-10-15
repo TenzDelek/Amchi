@@ -3,10 +3,10 @@ import { loadConfig } from "../src/config.js";
 import { parseUnifiedDiff } from "../src/git/diff.js";
 import { buildIndex, CodeGraph } from "../src/graph/indexer.js";
 import { CALL_GRACE_MS, createEmbedder, TrackedLLM } from "../src/llm/index.js";
-import { parseState, renderSummary } from "../src/review/render.js";
+import { MAX_COMMENT_CHARS, parseState, renderSummary } from "../src/review/render.js";
 import { BudgetExceededError, DeadlineExceededError, type ChatRequest, type LLM } from "../src/llm/types.js";
 import { MockChat } from "../src/llm/mock.js";
-import { planBatches, relatedGroups, reviewPullRequest } from "../src/review/reviewer.js";
+import { planBatches, relatedGroups, reviewPullRequest, type Finding } from "../src/review/reviewer.js";
 import { Searcher, buildChunks } from "../src/graph/search.js";
 import { TempRepo } from "./helpers.js";
 
@@ -291,5 +291,67 @@ describe("config schema warnings", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe("class-aware callers", () => {
+  it("shows callers of the changed class's method and not another class's method of the same name", async () => {
+    const repo = new TempRepo();
+    try {
+      const src = (v: number) => [
+        "export class Cart {",
+        `  save() { return ${v}; }`,
+        "  reload() { return this.save(); }",
+        "}",
+        "export class Repo {",
+        "  save() { return 0; }",
+        "  flush() { return this.save(); }",
+        "}",
+        "",
+      ].join("\n");
+      repo.write({ "src/a.ts": src(1) });
+      const base = repo.commit("init");
+      repo.write({ "src/a.ts": src(2) });
+      const head = repo.commit("change");
+      const { graph } = await graphFor(repo);
+      const fd = diffs(repo, base, head)[0];
+      const { buildFileContext } = await import("../src/review/context.js");
+      const ctx = await buildFileContext(fd, graph, new Searcher(buildChunks(graph)), 8000, new Set([fd.path]));
+      const callers = ctx.split("### ").find((s) => s.startsWith("Callers of `save`")) ?? "";
+      expect(callers).toContain("in `reload`");
+      expect(callers).not.toContain("in `flush`");
+      const cartSave = graph.defsByName.get("save")!.find((d) => d.symbol.parent === "Cart")!.symbol;
+      expect(graph.callersOfSymbol(cartSave).map((c) => c.symbol.name)).toEqual(["reload"]);
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe("summary comment size", () => {
+  it("always fits GitHub's limit and keeps a parseable state block", () => {
+    const findings: Finding[] = Array.from({ length: 80 }, (_, i) => ({
+      path: `src/f${i}.ts`, line: 5, severity: "medium", category: "bug", title: `Problem number ${i} in a long title that goes on`,
+      body: "x".repeat(2500), suggestion: "y".repeat(500), confidence: 0.8, fingerprint: `fp${i}`,
+    }));
+    const out = {
+      inline: findings, outside: [], dropped: 0, summary: { overview: "o", key_changes: ["k"], confidence: 3, confidence_reason: "r", diagram: "graph TD; A-->B" },
+      fileSummaries: Object.fromEntries(findings.map((f) => [f.path, "s".repeat(300)])), reviewed: [], skipped: [], failed: [],
+      budgetHit: false, deadlineHit: false, unverified: 0, funnel: { raw: 80, verified: 80, anchored: 80, passing: 80, capped: 80 }, timings: { context: 0, review: 0, verify: 0, summary: 0 },
+    };
+    const allFiles = findings.map((f) => ({ path: f.path, status: "modified" as const, binary: false, hunks: [], additions: 1, deletions: 0 }));
+    const meta = { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 1, outputTokens: 1, embeddingTexts: 0 }, trigger: "@amchi", allFiles };
+    const state = { files: Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`old/${i}.ts`, "z".repeat(300)])), issues: Object.fromEntries(Array.from({ length: 900 }, (_, i) => [`old${i}`, "low" as const])) };
+    const md = renderSummary(out, meta, state);
+    expect(md.length).toBeLessThanOrEqual(MAX_COMMENT_CHARS);
+    expect(md).toContain("## Findings");
+    expect(md).toContain("Problem number 79");
+    const st = parseState(md);
+    expect(st.lastSha).toBe("2".repeat(40));
+    expect(Object.keys(st.issues ?? {}).length).toBeGreaterThan(0);
+    // A small summary is untouched by the shrinking.
+    const small = renderSummary({ ...out, inline: findings.slice(0, 2), fileSummaries: {} }, { ...meta, allFiles: allFiles.slice(0, 2) }, {});
+    expect(small).toContain("Fix with agent prompt");
+    expect(small).toContain("📂 Files changed (2)");
   });
 });

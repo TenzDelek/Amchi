@@ -5,6 +5,7 @@
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
     "test": "vitest run"
   },
   "license": "MIT",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
+    "oxlint": "^1.88.0",
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
   },

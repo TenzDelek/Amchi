@@ -128,17 +128,19 @@ export function parseState(body: string): ReviewState {
   }
 }
 
-function encodeState(s: ReviewState): string {
-  // Cap size: GitHub comments max out at 65,536 chars.
+/** GitHub rejects comment bodies over 65,536 characters; stay under with a margin for the markers. */
+export const MAX_COMMENT_CHARS = 65_000;
+
+function encodeState(s: ReviewState, budget = { fileChars: 20_000, summaryChars: 300, issues: 500 }): string {
   const files: Record<string, string> = {};
   let size = 0;
   for (const [k, v] of Object.entries(s.files ?? {})) {
-    const add = k.length + v.length + 8;
-    if (size + add > 20_000) break;
-    files[k] = v.slice(0, 300);
+    const add = k.length + Math.min(v.length, budget.summaryChars) + 8;
+    if (size + add > budget.fileChars) break;
+    files[k] = v.slice(0, budget.summaryChars);
     size += add;
   }
-  const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-500));
+  const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-budget.issues));
   const pending = s.pending?.length ? s.pending.slice(0, 200) : undefined;
   return JSON.stringify({ ...s, files, issues, pending }).replace(/--/g, "&#45;&#45;");
 }
@@ -178,7 +180,19 @@ export function riskLabel(confidence: number): string {
   return "Very high risk";
 }
 
+/**
+ * Render the summary comment, shrinking optional parts until it fits GitHub's
+ * size limit: first the file table and stored summaries, then the agent prompt
+ * and the table, then the diagram, key changes and the long tail of findings.
+ */
 export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: ReviewState, opts: RenderOptions = {}): string {
+  for (let level = 0; ; level++) {
+    const md = buildSummary(out, meta, state, opts, level);
+    if (md.length <= MAX_COMMENT_CHARS || level >= 3) return md;
+  }
+}
+
+function buildSummary(out: ReviewOutput, meta: SummaryMeta, state: ReviewState, opts: RenderOptions, level: number): string {
   const L: string[] = [SUMMARY_MARKER];
   const s = out.summary;
 
@@ -188,7 +202,7 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
     const overview = s.overview.trim();
     L.push(`**[${riskLabel(s.confidence)}]** ${overview}`, "");
     if (s.confidence_reason) L.push(s.confidence_reason.trim(), "");
-    if (s.key_changes.length) {
+    if (s.key_changes.length && level < 3) {
       L.push("<details>", "<summary>Key changes</summary>", "");
       for (const k of s.key_changes) L.push(`- ${k}`);
       L.push("", "</details>", "");
@@ -198,18 +212,20 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   }
 
   // ---- findings (this run) + cumulative counts ---------------------------------
-  const issues: Record<string, Severity> = { ...(state.issues ?? {}) };
+  const issues: Record<string, Severity> = { ...state.issues };
   const current = [...out.inline, ...out.outside].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
   const newCount = current.filter((f) => !issues[f.fingerprint]).length;
   for (const f of current) issues[f.fingerprint] = f.severity;
 
   L.push("## Findings", "");
   if (current.length) {
-    current.forEach((f, i) => {
+    const listed = level >= 3 ? current.slice(0, 30) : current;
+    listed.forEach((f, i) => {
       const url = meta.commentUrls?.[f.fingerprint];
       const where = url ? ` [▶](${url})` : ` <sub>\`${location(f)}\`</sub>`;
       L.push(`${i + 1}. ${badge(f.severity, opts.badges)} **${escapeInline(f.title)}**${where}`);
     });
+    if (listed.length < current.length) L.push(`${listed.length + 1}. … and ${current.length - listed.length} more (see the inline comments)`);
     L.push("");
     const counts = new Map<Severity, number>();
     for (const sev of Object.values(issues)) counts.set(sev, (counts.get(sev) ?? 0) + 1);
@@ -221,25 +237,29 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
     if (meta.incrementalFrom && total > current.length) {
       L.push(`<sub>${newCount} new in this update · ${total} total on this PR (${countText})</sub>`, "");
     }
-    L.push("<details>", "<summary>Fix with agent prompt</summary>", "", fence(fixAllPrompt(current), "markdown"), "", "</details>", "");
+    if (level < 2) {
+      const prompt = level === 0 ? current : current.map((f) => ({ ...f, body: f.body.slice(0, 300), suggestion: undefined }));
+      L.push("<details>", "<summary>Fix with agent prompt</summary>", "", fence(fixAllPrompt(prompt), "markdown"), "", "</details>", "");
+    }
   } else {
     L.push("No issues found. 🎉", "");
   }
 
-  if (s?.diagram) {
+  if (s?.diagram && level < 3) {
     L.push("<details><summary>📊 Sequence diagram</summary>", "", "```mermaid", s.diagram, "```", "", "</details>", "");
   }
 
-  const fileSummaries = { ...(state.files ?? {}), ...out.fileSummaries };
+  const fileSummaries = level >= 2 ? { ...out.fileSummaries } : { ...state.files, ...out.fileSummaries };
   const files = meta.allFiles;
-  if (files.length) {
+  const tableRows = level === 0 ? 120 : level === 1 ? 40 : 0;
+  if (files.length && tableRows) {
     L.push(`<details><summary>📂 Files changed (${files.length})</summary>`, "", "| File | Changes | Summary |", "| --- | --- | --- |");
-    for (const f of files.slice(0, 120)) {
+    for (const f of files.slice(0, tableRows)) {
       const skip = out.skipped.find((x) => x.path === f.path);
       const sum = fileSummaries[f.path] ?? (skip ? `_skipped: ${skip.reason}_` : f.status === "deleted" ? "_deleted_" : "");
       L.push(`| \`${cell(f.path)}\` | +${f.additions} / -${f.deletions} | ${cell(sum)} |`);
     }
-    if (files.length > 120) L.push(`| … | | ${files.length - 120} more files |`);
+    if (files.length > tableRows) L.push(`| … | | ${files.length - tableRows} more files |`);
     L.push("", "</details>", "");
   }
 
@@ -270,8 +290,10 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   const lastSha = complete ? meta.headSha : state.lastSha;
   const pending = complete
     ? []
-    : [...out.failed, ...out.skipped.filter((s) => /deadline|budget/.test(s.reason)).map((s) => s.path)];
-  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
+    : [...out.failed, ...out.skipped.filter((x) => /deadline|budget/.test(x.reason)).map((x) => x.path)];
+  const budget =
+    level === 0 ? undefined : level === 1 ? { fileChars: 8000, summaryChars: 120, issues: 500 } : { fileChars: 2000, summaryChars: 80, issues: 200 };
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending }, budget)} -->`);
   return L.join("\n");
 }
 

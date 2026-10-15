@@ -24,6 +24,12 @@ export interface SymbolInfo {
   signature: string;
   /** Names this symbol calls / instantiates (deduped). */
   calls: string[];
+  /**
+   * Calls whose receiver is known: `this.save()` inside class Cart and `Cart.save()`
+   * both record "Cart.save". Lets callers of an ambiguous method name be filtered
+   * to the right class.
+   */
+  qualifiedCalls: string[];
 }
 
 export interface ParsedFile {
@@ -174,6 +180,34 @@ function calleeName(node: TSNode): string | null {
     if (f) return rightmostIdent(f);
   }
   return node.namedChildCount ? rightmostIdent(node.namedChild(0)) : null;
+}
+
+/** Receiver words that mean the enclosing class. */
+const SELF_WORDS = new Set(["this", "self", "super", "cls", "Self"]);
+
+/**
+ * The class a call is made on, when it can be read off the syntax: the enclosing
+ * container for `this.x()` / `self.x()` / `super.x()`, or a capitalised identifier
+ * for `Store.x()` / `Store::x()`. Anything else (a variable, a chained call) is null.
+ */
+function receiverOf(node: TSNode, container: string | undefined): string | null {
+  let holder: TSNode | null = null;
+  for (const field of ["function", "name", "method", "constructor", "type", "macro"]) {
+    const f = node.childForFieldName?.(field);
+    if (f) {
+      holder = f;
+      break;
+    }
+  }
+  if (!holder && node.namedChildCount) holder = node.namedChild(0);
+  // Java-style: the call node itself carries the receiver as a field.
+  let obj: TSNode | null = node.childForFieldName?.("object") ?? node.childForFieldName?.("receiver") ?? null;
+  if (!obj && holder && holder.namedChildCount >= 2) obj = holder.namedChild(0);
+  if (!obj) return null;
+  const text: string = obj.text;
+  if (SELF_WORDS.has(text) || /^(this|self|super)(_expression)?$/.test(obj.type)) return container ?? null;
+  if (IDENT_TYPES.has(obj.type) && /^[A-Z][A-Za-z0-9_]*$/.test(text)) return text;
+  return null;
 }
 
 function hasArgumentPart(node: TSNode): boolean {
@@ -331,6 +365,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
   const imports = new Set<string>();
   const topCalls = new Set<string>();
   const symbolCalls = new Map<SymbolInfo, Set<string>>();
+  const symbolQualified = new Map<SymbolInfo, Set<string>>();
   /** Dart: node id of a function_body -> the symbol whose signature precedes it. */
   const bodyOwner = new Map<number, SymbolInfo>();
 
@@ -367,6 +402,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
           parent: container,
           signature: signatureOf(node),
           calls: [],
+          qualifiedCalls: [],
         };
         if (lang === "dart" && node.type.endsWith("_signature")) {
           // `A() : x = f() { ... }` -> the initializer list and the body both belong to the constructor.
@@ -383,6 +419,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
         }
         symbols.push(sym);
         symbolCalls.set(sym, new Set());
+        symbolQualified.set(sym, new Set());
         nextOwner = sym;
         if (CONTAINER_KINDS.has(k)) nextContainer = name.replace(/^.* for /, "");
       }
@@ -395,8 +432,11 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
           const s = firstString(node.childForFieldName("arguments") ?? node);
           if (s) imports.add(callee === "require_relative" && !s.startsWith(".") ? `./${s}` : s);
         } else if (callee.length > 1) {
-          if (owner) symbolCalls.get(owner)!.add(callee);
-          else topCalls.add(callee);
+          if (owner) {
+            symbolCalls.get(owner)!.add(callee);
+            const receiver = lang === "dart" ? null : receiverOf(node, container);
+            if (receiver) symbolQualified.get(owner)!.add(`${receiver}.${callee}`);
+          } else topCalls.add(callee);
         }
       }
     }
@@ -417,6 +457,7 @@ export async function parseSource(content: string, lang: string): Promise<Parsed
   for (const [sym, calls] of symbolCalls) {
     calls.delete(sym.name); // ignore direct recursion noise
     sym.calls = [...calls].slice(0, 200);
+    sym.qualifiedCalls = [...(symbolQualified.get(sym) ?? [])].filter((q) => !q.endsWith(`.${sym.name}`) || !q.startsWith(`${sym.parent}.`)).slice(0, 200);
   }
   symbols.sort((a, b) => a.start - b.start || b.end - a.end);
   return { symbols, imports: [...imports].slice(0, 300), topLevelCalls: [...topCalls].slice(0, 200) };
