@@ -10,12 +10,12 @@ It builds a **code graph** of the whole repository (functions, classes, imports,
 
 - **Inline review comments** on bugs, logic errors, breaking changes, security and performance problems. Each one carries a colored **priority badge (P0–P4)**, a one-click ` ```suggestion ` fix when the fix is small and certain, and a collapsible **"Prompt To Fix With AI"** block you can paste into Claude Code, Cursor or Copilot.
 - **PR summary comment** headed by a **Confidence Score (1–5)** and a risk label, followed by a numbered findings list that links to each inline comment, a **"Fix with agent prompt"** block covering every issue, a Mermaid sequence diagram and a per-file change table. It updates in place on every push.
-- **Incremental reviews.** New pushes only review the commits since the last review, and comments are never posted twice.
+- **Incremental reviews.** New pushes only review the commits since the last review, and comments are never posted twice. A run that runs out of time or tokens still posts what it found, and the next run starts with the files it missed.
 - **Impact analysis from the graph:** callers of changed functions, removed functions that are still referenced, and deleted files that are still imported. The last check is deterministic, with no LLM involved.
 - **Chat.** Comment `@amchi how is the session token validated?` on any PR or issue, or inside an inline thread, and it answers using the code graph with links to the code.
 - **Re-run on demand** with `@amchi review`.
 - **Team rules and instructions** per path glob, in `.codereview.yml`.
-- **Cost guards:** a per-run token budget, max files, max comments, skipping drafts, bots and labels, and token usage printed in every summary.
+- **Cost guards:** a per-run token budget and time budget, max files, max comments, skipping drafts, bots and labels, and token usage printed in every summary.
 - **Any provider:** Anthropic, OpenAI, Gemini, or any OpenAI-compatible endpoint (OpenRouter, Azure, DeepSeek, Groq, vLLM, Ollama).
 
 ## How it works
@@ -60,7 +60,7 @@ git tag v2 && git push origin v2
 
 **2. Add an API key secret** to the repo (or org) being reviewed: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY`. One is enough. Reviewing with OpenAI or Gemini also turns on semantic search with that same vendor's embeddings; with Claude, set `embeddings: openai` or `gemini` if you want to send code chunks to a second vendor for it.
 
-**3. Add the workflow.** Copy [`examples/workflow.yml`](examples/workflow.yml) to `.github/workflows/code-review.yml` and replace `YOUR_ORG`. Optionally copy [`examples/.codereview.yml`](examples/.codereview.yml) to the repo root.
+**3. Add the workflow.** Copy [`examples/workflow.yml`](examples/workflow.yml) to `.github/workflows/code-review.yml` and point its `uses:` line at the action repo and tag you published. Optionally copy [`examples/.codereview.yml`](examples/.codereview.yml) to the repo root.
 
 That's it. Open a PR.
 
@@ -96,7 +96,7 @@ Every summary ends with the exact number of LLM calls and input/output tokens fo
 
 ## Design decisions
 
-Architecture decision records live in [`docs/adr/`](docs/adr/README.md).
+Architecture decision records live in [`docs/adr/`](docs/adr/README.md). User-visible changes per release are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Security
 
@@ -135,6 +135,8 @@ npm test          # parser, indexer, diff, end-to-end review (mock LLM), GitHub 
 npm run build     # bundles dist/index.js + dist/cli.js and copies the WASM grammars
 ```
 
+`vitest.config.ts` runs test workers with `--liftoff-only`; without it the Swift grammar can crash a worker with a V8 out-of-memory error. Commit `dist/` together with any change under `src/`, since the action runs from it.
+
 Project layout:
 
 ```
@@ -155,4 +157,4 @@ src/
 
 - It's a CI job, not a hosted service. The first run on a large repo spends a little time indexing (and embedding, if enabled); after that the cache makes runs incremental.
 - Call edges are name-based. They're fast and language-agnostic, but not type-resolved, so a very common method name like `get` can link to several definitions. The context builder prefers definitions from imported files and the same directory.
-- It reviews what the model can see. Very large diffs are truncated per file, and files past `max_files` are listed as skipped in the summary.
+- It reviews what the model can see. Very large diffs are truncated per file, and files past `max_files`, the token budget or the time budget are listed as skipped in the summary, with the reason.

@@ -76,5 +76,5 @@ without knowing why.
 ## Action Items
 
 1. [x] Change `createEmbedder` and its test; document in README and example config.
-2. [ ] Mention the change in the next release notes, since existing Claude installs
-   will see "Embeddings: off" on their next run.
+2. [x] Mention the change in the next release notes (`CHANGELOG.md`, Unreleased),
+   since existing Claude installs will see "Embeddings: off" on their next run.
