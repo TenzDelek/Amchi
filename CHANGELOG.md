@@ -2,7 +2,7 @@
 
 Notable changes to Amchi. Each entry names the behaviour a user or operator will notice; design rationale lives in [`docs/adr/`](docs/adr/README.md).
 
-## Unreleased
+## 2.1.0 — 2026-10-15
 
 ### Behaviour changes
 
