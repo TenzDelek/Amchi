@@ -6,6 +6,10 @@ export interface ChatRequest {
   maxTokens?: number;
   /** Label for logs and usage accounting, e.g. "review:src/a.ts". */
   label?: string;
+  /** Use this model instead of the provider's default (same provider, same key). */
+  model?: string;
+  /** Epoch ms after which the call must not start and retries must stop. */
+  deadline?: number;
 }
 
 export interface ChatResult {
@@ -32,6 +36,13 @@ export class BudgetExceededError extends Error {
   constructor(msg: string) {
     super(msg);
     this.name = "BudgetExceededError";
+  }
+}
+
+export class DeadlineExceededError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "DeadlineExceededError";
   }
 }
 

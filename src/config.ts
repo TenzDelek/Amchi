@@ -23,6 +23,8 @@ export interface Rule {
 export interface Config {
   provider: "auto" | ProviderName;
   model?: string;
+  /** Model for the verification pass (same provider). A smaller model keeps `review.verify` cheap. */
+  verify_model?: string;
   base_url?: string;
   embeddings: "auto" | "openai" | "gemini" | "off";
   embedding_model?: string;
@@ -74,6 +76,12 @@ export interface Config {
     max_output_tokens: number;
     max_total_input_tokens: number;
     concurrency: number;
+    /**
+     * Wall-clock budget for the LLM phase. Files not reviewed by then are reported
+     * as skipped and picked up by the next run; 0 disables. Keep it below the
+     * workflow's timeout-minutes so partial results still get posted.
+     */
+    max_run_seconds: number;
   };
 }
 
@@ -134,6 +142,7 @@ export const DEFAULT_CONFIG: Config = {
     max_output_tokens: 8000,
     max_total_input_tokens: 1_500_000,
     concurrency: 4,
+    max_run_seconds: 900,
   },
 };
 

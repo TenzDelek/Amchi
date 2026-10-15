@@ -17,8 +17,9 @@ permissions:
   issues: write
 
 concurrency:
-  # Reviews of the same PR replace each other; every comment (question) gets its own run.
-  group: amchi-${{ github.event.comment.id && format('comment-{0}', github.event.comment.id) || github.event.pull_request.number || github.ref }}
+  # Reviews of the same PR share one group so two runs never post the same finding twice:
+  # pushes replace each other, "@amchi review" waits for a running review. Questions get their own run.
+  group: amchi-${{ (github.event.comment.id && !contains(github.event.comment.body, '@amchi review') && format('comment-{0}', github.event.comment.id)) || github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -36,14 +37,16 @@ jobs:
           fetch-depth: 0 # needed for merge-base and incremental reviews
           ref: ${{ github.event.pull_request.head.sha || (github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number)) || github.sha }}
 
-      # Persist the code graph + embeddings between runs.
+      # Persist the code graph + embeddings between runs. Keyed by commit so re-runs
+      # of the same commit reuse one entry instead of writing a new one each time.
       - uses: actions/cache@v5
         with:
           path: .amchi
-          key: amchi-${{ runner.os }}-${{ github.run_id }}
+          key: amchi-${{ runner.os }}-${{ github.event.pull_request.head.sha || github.sha }}
           restore-keys: amchi-${{ runner.os }}-
 
       - uses: TenzDelek/Amchi@v2
+        timeout-minutes: 18 # leave the step a margin under the job timeout; max_run_seconds (15 min) posts partial results first
         with:
           # Provide at least one key. With several, `provider` picks (default: anthropic > openai > gemini).
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

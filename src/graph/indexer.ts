@@ -456,11 +456,28 @@ export class CodeGraph {
 
   /** Files whose imports would resolve to `path` if it existed (for deleted/moved files). */
   importersOfMissing(path: string): string[] {
-    if (this.data.files[path]) return this.importersOf(path);
-    const resolver = new ImportResolver([...Object.keys(this.data.files), path]);
-    const out: string[] = [];
+    return this.importersOfMissingMany([path]).get(path) ?? [];
+  }
+
+  /** Same as `importersOfMissing` for many paths, with a single pass over the repo's imports. */
+  importersOfMissingMany(paths: string[]): Map<string, string[]> {
+    const out = new Map<string, string[]>();
+    const missing = paths.filter((p) => {
+      if (!this.data.files[p]) return true;
+      out.set(p, this.importersOf(p));
+      return false;
+    });
+    if (!missing.length) return out;
+    const want = new Set(missing);
+    for (const p of missing) out.set(p, []);
+    const resolver = new ImportResolver([...Object.keys(this.data.files), ...missing]);
     for (const f of Object.values(this.data.files)) {
-      if (f.imports.some((i) => resolver.resolve(f.path, i, f.lang) === path)) out.push(f.path);
+      const hit = new Set<string>();
+      for (const i of f.imports) {
+        const r = resolver.resolve(f.path, i, f.lang);
+        if (r && want.has(r)) hit.add(r);
+      }
+      for (const r of hit) out.get(r)!.push(f.path);
     }
     return out;
   }

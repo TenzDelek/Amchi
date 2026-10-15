@@ -11,7 +11,7 @@ export interface ContextSection {
 }
 
 /** Names so common (builtins, collection methods) that name-matching them is mostly noise. */
-const COMMON_NAMES = new Set([
+export const COMMON_NAMES = new Set([
   "map", "filter", "reduce", "forEach", "find", "findIndex", "some", "every", "includes", "indexOf", "slice", "splice",
   "push", "pop", "shift", "unshift", "concat", "join", "split", "replace", "match", "test", "exec", "trim", "keys",
   "values", "entries", "get", "set", "has", "delete", "add", "clear", "then", "catch", "finally", "toString",

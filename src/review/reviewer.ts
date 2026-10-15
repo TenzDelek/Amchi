@@ -1,12 +1,12 @@
 import { isReviewable, rulesForPath, severityRank, SEVERITY_ORDER, type Config, type Rule, type Severity } from "../config.js";
 import type { CodeGraph } from "../graph/indexer.js";
 import type { Searcher } from "../graph/search.js";
-import { commentableLines, renderDiffForModel, type FileDiff } from "../git/diff.js";
+import { changedRanges, commentableLines, renderDiffForModel, type FileDiff } from "../git/diff.js";
 import { parseModelJson } from "../llm/json.js";
-import { BudgetExceededError, type LLM } from "../llm/types.js";
+import { BudgetExceededError, DeadlineExceededError, type LLM } from "../llm/types.js";
 import { log } from "../util/log.js";
 import { estimateTokens, mapLimit, shortHash, truncateTokens } from "../util/text.js";
-import { buildFileContext } from "./context.js";
+import { buildFileContext, COMMON_NAMES } from "./context.js";
 import { renderPrHeader, renderRules, REVIEW_SYSTEM, SUMMARY_SYSTEM, VERIFY_SYSTEM, type PrMeta } from "./prompts.js";
 
 export interface Finding {
@@ -30,6 +30,33 @@ export interface SummaryJson {
   diagram: string | null;
 }
 
+/** How many findings survived each stage, so it is visible where they are lost. */
+export interface Funnel {
+  /** Findings returned by the model (after basic normalisation). */
+  raw: number;
+  /** Left after the optional verification pass. */
+  verified: number;
+  /** Snapped to a line GitHub accepts (the rest move to the summary). */
+  anchored: number;
+  /** Deduplicated and above the severity / confidence thresholds. */
+  passing: number;
+  /** Kept under `review.max_comments`. */
+  capped: number;
+  /** Actually posted as new inline comments (set by the action after deduping against earlier runs). */
+  posted?: number;
+}
+
+/** Milliseconds per stage. */
+export interface Timings {
+  index?: number;
+  /** Summed over files (they run concurrently), so it can exceed `review`. */
+  context: number;
+  /** Wall time of the review calls, context retrieval included. */
+  review: number;
+  verify: number;
+  summary: number;
+}
+
 export interface ReviewOutput {
   /** Findings that can be posted as inline review comments. */
   inline: Finding[];
@@ -43,6 +70,10 @@ export interface ReviewOutput {
   skipped: { path: string; reason: string }[];
   failed: string[];
   budgetHit: boolean;
+  /** `limits.max_run_seconds` ran out before every batch was reviewed. */
+  deadlineHit: boolean;
+  funnel: Funnel;
+  timings: Timings;
 }
 
 export interface ReviewInput {
@@ -61,6 +92,8 @@ export interface ReviewInput {
   previousFileSummaries?: Record<string, string>;
   /** Verify findings with a second pass (fewer false positives, ~2x cost). */
   verify?: boolean;
+  /** Epoch ms after which no new review batch is started. */
+  deadline?: number;
 }
 
 interface RawFinding {
@@ -84,10 +117,88 @@ export function fingerprint(path: string, title: string): string {
   return shortHash(`${path}|${title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
 }
 
-interface Batch {
+export interface Batch {
   files: FileDiff[];
   diffs: Map<string, string>;
   diffTokens: number;
+}
+
+/** Changed files that depend on each other: imports between them, or one calls a symbol the other changes. */
+export function relatedGroups(candidates: FileDiff[], graph: CodeGraph): FileDiff[][] {
+  const paths = new Set(candidates.map((f) => f.path));
+  const parent = new Map(candidates.map((f) => [f.path, f.path]));
+  const find = (p: string): string => {
+    while (parent.get(p) !== p) {
+      parent.set(p, parent.get(parent.get(p)!)!);
+      p = parent.get(p)!;
+    }
+    return p;
+  };
+  const union = (a: string, b: string) => parent.set(find(a), find(b));
+  for (const f of candidates) {
+    for (const r of graph.file(f.path)?.resolved ?? []) if (paths.has(r)) union(f.path, r);
+    for (const i of graph.importersOf(f.path)) if (paths.has(i)) union(f.path, i);
+    const seen = new Set<string>();
+    for (const [s, e] of changedRanges(f)) {
+      for (const sym of graph.symbolsOverlapping(f.path, s, e)) {
+        if (seen.has(sym.name) || COMMON_NAMES.has(sym.name)) continue;
+        seen.add(sym.name);
+        // Same precision rule as the context builder: trust a name match only when it is unique or imported.
+        const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
+        for (const c of graph.callersOf(sym.name)) {
+          if (c.path !== f.path && paths.has(c.path) && (unique || graph.dependsOn(c.path, f.path))) union(f.path, c.path);
+        }
+      }
+    }
+  }
+  const groups = new Map<string, FileDiff[]>();
+  for (const f of candidates) (groups.get(find(f.path)) ?? groups.set(find(f.path), []).get(find(f.path))!).push(f);
+  return [...groups.values()];
+}
+
+/**
+ * Pack files into LLM calls. Files that depend on each other go into the same
+ * call where they fit, so a signature change and its updated callers are
+ * reviewed together; groups are then filled greedily by diff size.
+ */
+export function planBatches(candidates: FileDiff[], graph: CodeGraph, maxDiffPerBatch: number, maxFiles = 5): Batch[] {
+  const size = (f: FileDiff) => f.additions + f.deletions;
+  const render = (f: FileDiff) => {
+    let d = renderDiffForModel(f);
+    let t = estimateTokens(d);
+    if (t > maxDiffPerBatch) {
+      d = truncateTokens(d, maxDiffPerBatch);
+      t = maxDiffPerBatch;
+      log.warn(`Diff for ${f.path} is very large; reviewing a truncated version`);
+    }
+    return { f, d, t };
+  };
+  const groups = relatedGroups(candidates, graph)
+    .map((g) => {
+      const files = g.sort((a, b) => size(b) - size(a)).map(render);
+      return { files, tokens: files.reduce((n, x) => n + x.t, 0) };
+    })
+    .sort((a, b) => b.tokens - a.tokens || b.files.length - a.files.length);
+
+  const batches: Batch[] = [];
+  let cur: Batch = { files: [], diffs: new Map(), diffTokens: 0 };
+  const flush = () => {
+    if (cur.files.length) batches.push(cur);
+    cur = { files: [], diffs: new Map(), diffTokens: 0 };
+  };
+  for (const g of groups) {
+    // A group that would not fit entirely in the current batch starts a fresh one, so it stays together.
+    const fits = cur.files.length + g.files.length <= maxFiles && cur.diffTokens + g.tokens <= maxDiffPerBatch;
+    if (cur.files.length && !fits) flush();
+    for (const { f, d, t } of g.files) {
+      if (cur.files.length && (cur.diffTokens + t > maxDiffPerBatch || cur.files.length >= maxFiles)) flush();
+      cur.files.push(f);
+      cur.diffs.set(f.path, d);
+      cur.diffTokens += t;
+    }
+  }
+  flush();
+  return batches;
 }
 
 export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutput> {
@@ -95,7 +206,10 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   const skipped: { path: string; reason: string }[] = [];
   const failed: string[] = [];
   let budgetHit = false;
+  let deadlineHit = false;
+  const timings: Timings = { context: 0, review: 0, verify: 0, summary: 0 };
   const prPaths = new Set(input.files.map((f) => f.path));
+  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
 
   // ---- 1. choose files -----------------------------------------------------
   let candidates: FileDiff[] = [];
@@ -114,10 +228,13 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
 
   // Deterministic check: deleted files that are still imported.
   const outside: Finding[] = [];
-  for (const f of (input.allFiles ?? input.files).filter((x) => x.status === "deleted" || (x.status === "renamed" && x.oldPath))) {
-    const gone = f.status === "deleted" ? f.path : f.oldPath!;
-    if (graph.file(gone)) continue; // still exists
-    const importers = graph.importersOfMissing(gone);
+  const goneFiles = (input.allFiles ?? input.files)
+    .filter((x) => x.status === "deleted" || (x.status === "renamed" && x.oldPath))
+    .map((f) => ({ f, gone: f.status === "deleted" ? f.path : f.oldPath! }))
+    .filter(({ gone }) => !graph.file(gone)); // still exists
+  const importersByGone = graph.importersOfMissingMany(goneFiles.map((g) => g.gone));
+  for (const { f, gone } of goneFiles) {
+    const importers = importersByGone.get(gone) ?? [];
     if (importers.length) {
       const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
       outside.push({
@@ -138,25 +255,7 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + 2500; // + system prompt
   const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
-  const batches: Batch[] = [];
-  let cur: Batch = { files: [], diffs: new Map(), diffTokens: 0 };
-  for (const f of candidates) {
-    let d = renderDiffForModel(f);
-    let t = estimateTokens(d);
-    if (t > maxDiffPerBatch) {
-      d = truncateTokens(d, maxDiffPerBatch);
-      t = maxDiffPerBatch;
-      log.warn(`Diff for ${f.path} is very large; reviewing a truncated version`);
-    }
-    if (cur.files.length && (cur.diffTokens + t > maxDiffPerBatch || cur.files.length >= 5)) {
-      batches.push(cur);
-      cur = { files: [], diffs: new Map(), diffTokens: 0 };
-    }
-    cur.files.push(f);
-    cur.diffs.set(f.path, d);
-    cur.diffTokens += t;
-  }
-  if (cur.files.length) batches.push(cur);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch);
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)`);
 
   // ---- 3. review each batch -------------------------------------------------
@@ -164,7 +263,13 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   const raw: { finding: Finding; batch: number }[] = [];
   const batchPrompts: string[] = [];
 
+  const t0 = Date.now();
   await mapLimit(batches, cfg.limits.concurrency, async (batch, bi) => {
+    if (pastDeadline()) {
+      deadlineHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+      return;
+    }
     const ctxBudget = Math.max(
       1500,
       Math.floor((perCall - headerTokens - batch.diffTokens) * 0.9 / batch.files.length),
@@ -177,11 +282,13 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
 
     for (const f of batch.files) {
       let ctx = "";
+      const tc = Date.now();
       try {
         ctx = await buildFileContext(f, graph, searcher, ctxBudget, prPaths);
       } catch (e) {
         log.warn(`Context retrieval failed for ${f.path}: ${(e as Error).message}`);
       }
+      timings.context += Date.now() - tc;
       parts.push(
         `\n==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================\n` +
           `## Diff\n\`\`\`diff\n${batch.diffs.get(f.path)}\n\`\`\`\n` +
@@ -214,17 +321,24 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
         budgetHit = true;
         for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
         log.warn(e.message);
+      } else if (e instanceof DeadlineExceededError) {
+        deadlineHit = true;
+        for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+        log.warn(e.message);
       } else {
         failed.push(...batch.files.map((f) => f.path));
         log.warn(`Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ${(e as Error).message}`);
       }
     }
   });
+  timings.review = Date.now() - t0; // wall time of the review calls, context retrieval included
 
   // ---- 4. optional verification pass ----------------------------------------
   let findings = raw;
   if (input.verify && raw.length) {
+    const tv = Date.now();
     findings = await verifyFindings(llm, cfg, raw, batchPrompts);
+    timings.verify = Date.now() - tv;
   }
 
   // ---- 5. anchor, filter, dedupe, cap ---------------------------------------
@@ -250,13 +364,26 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   // ---- 6. summary -----------------------------------------------------------
   let summary: SummaryJson | null = null;
   if (cfg.summary.enabled) {
+    const ts = Date.now();
     try {
-      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? []);
+      // The summary is one small call; give it a short grace period past the deadline so a partial run still gets a score.
+      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + 90_000 : undefined;
+      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
       log.warn(`Summary generation failed: ${(e as Error).message}`);
     }
+    timings.summary = Date.now() - ts;
   }
+
+  const funnel: Funnel = {
+    raw: raw.length,
+    verified: findings.length,
+    anchored: inlineAll.length,
+    passing: passing.length,
+    capped: inline.length,
+  };
+  log.info(`Findings funnel: ${renderFunnel(funnel)} · timings: ${renderTimings(timings)}`);
 
   return {
     inline,
@@ -268,7 +395,26 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
     skipped,
     failed,
     budgetHit,
+    deadlineHit,
+    funnel,
+    timings,
   };
+}
+
+export function renderFunnel(f: Funnel): string {
+  const parts = [`${f.raw} raw`, `${f.verified} verified`, `${f.anchored} anchored`, `${f.passing} passing`, `${f.capped} capped`];
+  if (f.posted !== undefined) parts.push(`${f.posted} posted`);
+  return parts.join(" → ");
+}
+
+export function renderTimings(t: Timings): string {
+  const s = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  const parts = [];
+  if (t.index !== undefined) parts.push(`index ${s(t.index)}`);
+  parts.push(`context ${s(t.context)}`, `review ${s(t.review)}`);
+  if (t.verify) parts.push(`verify ${s(t.verify)}`);
+  if (t.summary) parts.push(`summary ${s(t.summary)}`);
+  return parts.join(" · ");
 }
 
 function normalizeFinding(rf: RawFinding, files: FileDiff[]): Finding | null {
@@ -369,6 +515,7 @@ async function verifyFindings(
         json: true,
         maxTokens: 2000,
         label: `verify:${bi}`,
+        model: cfg.verify_model,
       });
       const parsed = parseModelJson<{ keep?: { id: number; confidence?: number }[] }>(res.text);
       const keep = new Map((parsed.keep ?? []).map((k) => [k.id, k.confidence]));
@@ -394,6 +541,7 @@ async function summarize(
   fileSummaries: Record<string, string>,
   findings: Finding[],
   commits: { sha: string; subject: string }[],
+  deadline?: number,
 ): Promise<SummaryJson> {
   const fileLines = files
     .slice(0, 150)
@@ -418,6 +566,7 @@ ${findingLines}`;
     json: true,
     maxTokens: 3000,
     label: "summary",
+    deadline,
   });
   const s = parseModelJson<Partial<SummaryJson>>(res.text);
   return {

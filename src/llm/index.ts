@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { log } from "../util/log.js";
 import { AnthropicChat, GeminiChat, GeminiEmbedder, OpenAIChat, OpenAIEmbedder } from "./providers.js";
 import { MockChat, MockEmbedder } from "./mock.js";
-import { BudgetExceededError, type ChatRequest, type ChatResult, type Embedder, type LLM, type Usage } from "./types.js";
+import { BudgetExceededError, DeadlineExceededError, type ChatRequest, type ChatResult, type Embedder, type LLM, type Usage } from "./types.js";
 
 export * from "./types.js";
 
@@ -50,12 +50,16 @@ export function resolveProvider(cfg: Config, keys: Keys): ProviderName {
   );
 }
 
-/** Tracks token usage across all calls and enforces the per-run budget. */
+/** Tracks token usage across all calls and enforces the per-run budget and deadline. */
 export class TrackedLLM implements LLM {
   readonly usage: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, embeddingTexts: 0 };
+  /** Estimated input tokens of calls in flight, so concurrent calls cannot all pass the budget check. */
+  private reserved = 0;
   constructor(
     private inner: LLM,
     private maxTotalInputTokens: number,
+    /** Epoch ms; calls that have not started by then are refused. */
+    readonly deadline?: number,
   ) {}
   get provider() {
     return this.inner.provider;
@@ -65,14 +69,24 @@ export class TrackedLLM implements LLM {
   }
   async chat(req: ChatRequest): Promise<ChatResult> {
     const approx = Math.ceil((req.system.length + req.user.length) / 4);
-    if (this.usage.inputTokens + approx > this.maxTotalInputTokens) {
+    const deadline = req.deadline ?? this.deadline;
+    if (deadline && Date.now() >= deadline) {
+      throw new DeadlineExceededError("Run deadline reached (limits.max_run_seconds); skipping remaining LLM calls");
+    }
+    if (this.usage.inputTokens + this.reserved + approx > this.maxTotalInputTokens) {
       throw new BudgetExceededError(
         `Token budget reached (${this.usage.inputTokens.toLocaleString()} / ${this.maxTotalInputTokens.toLocaleString()} input tokens). ` +
           "Raise limits.max_total_input_tokens to review more.",
       );
     }
+    this.reserved += approx;
     const t0 = Date.now();
-    const res = await this.inner.chat(req);
+    let res: ChatResult;
+    try {
+      res = await this.inner.chat({ ...req, deadline });
+    } finally {
+      this.reserved -= approx;
+    }
     const dump = process.env.AMCHI_DUMP_PROMPTS;
     if (dump) {
       // Debug aid: write every prompt/response pair to a folder.
@@ -90,7 +104,7 @@ export class TrackedLLM implements LLM {
   }
 }
 
-export function createLLM(cfg: Config, keys: Keys): TrackedLLM {
+export function createLLM(cfg: Config, keys: Keys, opts: { deadline?: number } = {}): TrackedLLM {
   const provider = resolveProvider(cfg, keys);
   const model = cfg.model || DEFAULT_MODELS[provider];
   let inner: LLM;
@@ -112,20 +126,31 @@ export function createLLM(cfg: Config, keys: Keys): TrackedLLM {
       inner = new MockChat();
       break;
   }
-  log.info(`LLM: ${provider} / ${model}`);
-  return new TrackedLLM(inner, cfg.limits.max_total_input_tokens);
+  log.info(`LLM: ${provider} / ${model}${cfg.verify_model ? ` (verify: ${cfg.verify_model})` : ""}`);
+  return new TrackedLLM(inner, cfg.limits.max_total_input_tokens, opts.deadline);
 }
 
-/** Embeddings are optional: without them retrieval falls back to BM25 + graph edges. */
+/**
+ * Embeddings are optional: without them retrieval falls back to BM25 + graph edges.
+ * `auto` only uses the review provider's own embedding API, so repository code is
+ * never sent to a second vendor unless `embeddings` names one explicitly.
+ */
 export function createEmbedder(cfg: Config, keys: Keys): Embedder | null {
   let choice = cfg.embeddings;
   if (choice === "off") return null;
   if (cfg.provider === "mock") return new MockEmbedder();
   if (choice === "auto") {
-    if (keys.openai && !(cfg.provider === "openai" && cfg.base_url)) choice = "openai";
-    else if (keys.gemini) choice = "gemini";
+    let provider: ProviderName | null = null;
+    try {
+      provider = resolveProvider(cfg, keys);
+    } catch {
+      /* no key at all: handled below */
+    }
+    if (provider === "openai" && keys.openai && !cfg.base_url) choice = "openai";
+    else if (provider === "gemini" && keys.gemini) choice = "gemini";
     else {
-      log.info("Embeddings: off (no OpenAI or Gemini key) — using keyword + graph retrieval");
+      const hint = keys.openai || keys.gemini ? ` Set embeddings: ${keys.openai ? "openai" : "gemini"} to send code chunks to that vendor for semantic search.` : "";
+      log.info(`Embeddings: off (auto only uses the review provider's own embeddings).${hint} Using keyword + graph retrieval.`);
       return null;
     }
   }

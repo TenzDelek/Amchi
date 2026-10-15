@@ -134,7 +134,7 @@ describe("rendering", () => {
     const g: Finding = { ...f, path: "b.ts", line: 10, endLine: 12, severity: "critical", title: "SQL injection", body: "Unescaped input.", suggestion: undefined, fingerprint: "def456" };
     const md = renderSummary(
       {
-        inline: [f, g], outside: [], dropped: 0, fileSummaries: {}, reviewed: [], skipped: [], failed: [], budgetHit: false,
+        inline: [f, g], outside: [], dropped: 0, fileSummaries: {}, reviewed: [], skipped: [], failed: [], budgetHit: false, deadlineHit: false, funnel: { raw: 0, verified: 0, anchored: 0, passing: 0, capped: 0 }, timings: { context: 0, review: 0, verify: 0, summary: 0 },
         summary: { overview: "Adds sorting.", key_changes: ["sorting"], confidence: 3, confidence_reason: "Fix the injection first.", diagram: null },
       },
       {
@@ -163,7 +163,7 @@ describe("rendering", () => {
 
   it("round-trips state through the summary comment, even with '--' in text", () => {
     const md = renderSummary(
-      { inline: [f], outside: [], dropped: 0, fileSummaries: { "a.ts": "uses --flag --> safely" }, summary: null, reviewed: [], skipped: [], failed: [], budgetHit: false },
+      { inline: [f], outside: [], dropped: 0, fileSummaries: { "a.ts": "uses --flag --> safely" }, summary: null, reviewed: [], skipped: [], failed: [], budgetHit: false, deadlineHit: false, funnel: { raw: 0, verified: 0, anchored: 0, passing: 0, capped: 0 }, timings: { context: 0, review: 0, verify: 0, summary: 0 }, },
       { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 10, outputTokens: 5, embeddingTexts: 0 }, trigger: "@amchi", allFiles: [] },
       {},
     );

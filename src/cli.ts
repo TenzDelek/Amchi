@@ -7,6 +7,7 @@ import { Git } from "./git/git.js";
 import { openWorkspace } from "./graph/workspace.js";
 import { createEmbedder, createLLM, keysFromEnv } from "./llm/index.js";
 import { renderLocalReport } from "./review/render.js";
+import { renderFunnel, renderTimings } from "./review/reviewer.js";
 import { runReview } from "./run.js";
 import { log, setVerbose } from "./util/log.js";
 import { relaunchWithBaselineWasm } from "./util/relaunch.js";
@@ -114,11 +115,12 @@ async function main() {
     if (git.run(["status", "--porcelain", "--untracked-files=no"], { allowFail: true }).trim()) {
       log.warn("You have uncommitted changes; they are indexed for context but not reviewed. Commit them to review them.");
     }
-    const llm = createLLM(cfg, keys);
+    const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
+    const llm = createLLM(cfg, keys, { deadline });
     const embedder = createEmbedder(cfg, keys);
     const title = str(flags.title) ?? git.run(["log", "-1", "--format=%s", headSha]).trim();
     const body = git.run(["log", "-1", "--format=%b", headSha]).trim();
-    const res = await runReview({ root, cfg, llm, embedder, baseSha, headSha, title, body });
+    const res = await runReview({ root, cfg, llm, embedder, baseSha, headSha, title, body, deadline });
     if (flags.json) {
       output(JSON.stringify({ ...res.out, reviewed: res.out.reviewed.map((f) => f.path), usage: llm.usage }, null, 2), flags);
     } else {
@@ -137,6 +139,7 @@ async function main() {
       );
     }
     log.info(`LLM usage: ${llm.usage.calls} call(s), ${llm.usage.inputTokens.toLocaleString()} in / ${llm.usage.outputTokens.toLocaleString()} out tokens`);
+    log.info(`Findings funnel: ${renderFunnel(res.out.funnel)} · timings: ${renderTimings(res.out.timings)}`);
     return;
   }
 

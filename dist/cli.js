@@ -11005,7 +11005,8 @@ var DEFAULT_CONFIG = {
     max_input_tokens_per_call: 6e4,
     max_output_tokens: 8e3,
     max_total_input_tokens: 15e5,
-    concurrency: 4
+    concurrency: 4,
+    max_run_seconds: 900
   }
 };
 function isObj(v) {
@@ -12545,11 +12546,27 @@ var CodeGraph = class {
   }
   /** Files whose imports would resolve to `path` if it existed (for deleted/moved files). */
   importersOfMissing(path2) {
-    if (this.data.files[path2]) return this.importersOf(path2);
-    const resolver = new ImportResolver([...Object.keys(this.data.files), path2]);
-    const out2 = [];
+    return this.importersOfMissingMany([path2]).get(path2) ?? [];
+  }
+  /** Same as `importersOfMissing` for many paths, with a single pass over the repo's imports. */
+  importersOfMissingMany(paths) {
+    const out2 = /* @__PURE__ */ new Map();
+    const missing = paths.filter((p) => {
+      if (!this.data.files[p]) return true;
+      out2.set(p, this.importersOf(p));
+      return false;
+    });
+    if (!missing.length) return out2;
+    const want = new Set(missing);
+    for (const p of missing) out2.set(p, []);
+    const resolver = new ImportResolver([...Object.keys(this.data.files), ...missing]);
     for (const f of Object.values(this.data.files)) {
-      if (f.imports.some((i) => resolver.resolve(f.path, i, f.lang) === path2)) out2.push(f.path);
+      const hit = /* @__PURE__ */ new Set();
+      for (const i of f.imports) {
+        const r = resolver.resolve(f.path, i, f.lang);
+        if (r && want.has(r)) hit.add(r);
+      }
+      for (const r of hit) out2.get(r).push(f.path);
     }
     return out2;
   }
@@ -12789,6 +12806,20 @@ async function openWorkspace(root, cfg, embedder, opts = {}) {
 import { mkdirSync as mkdirSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join6 } from "node:path";
 
+// src/llm/types.ts
+var BudgetExceededError = class extends Error {
+  constructor(msg) {
+    super(msg);
+    this.name = "BudgetExceededError";
+  }
+};
+var DeadlineExceededError = class extends Error {
+  constructor(msg) {
+    super(msg);
+    this.name = "DeadlineExceededError";
+  }
+};
+
 // src/llm/http.ts
 var HttpError = class extends Error {
   constructor(status, body2, url) {
@@ -12807,14 +12838,18 @@ var RETRYABLE = /* @__PURE__ */ new Set([408, 409, 425, 429, 500, 502, 503, 504,
 async function postJson(url, body2, headers, opts = {}) {
   const attempts = opts.attempts ?? 6;
   const timeoutMs = opts.timeoutMs ?? 24e4;
+  const remaining = () => opts.deadline ? opts.deadline - Date.now() : Infinity;
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (remaining() <= 0) {
+      throw lastErr ?? new DeadlineExceededError("Run deadline reached before the request could start");
+    }
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify(body2),
-        signal: AbortSignal.timeout(timeoutMs)
+        signal: AbortSignal.timeout(Math.max(1e3, Math.min(timeoutMs, remaining())))
       });
       const text = await res.text();
       if (res.ok) return JSON.parse(text);
@@ -12823,13 +12858,16 @@ async function postJson(url, body2, headers, opts = {}) {
       lastErr = err2;
       const retryAfter = Number(res.headers.get("retry-after"));
       const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1e3, 6e4) : backoff(attempt);
+      if (wait > remaining()) throw new DeadlineExceededError(`Run deadline reached while retrying: ${err2.message}`);
       log.warn(`LLM request got ${res.status}; retrying in ${Math.round(wait / 1e3)}s (attempt ${attempt}/${attempts})`);
       await sleep(wait);
     } catch (e) {
+      if (e instanceof DeadlineExceededError) throw e;
       if (e instanceof HttpError && !RETRYABLE.has(e.status)) throw e;
       if (attempt === attempts) throw e;
       lastErr = e;
       const wait = backoff(attempt);
+      if (wait > remaining()) throw new DeadlineExceededError(`Run deadline reached while retrying: ${e.message}`);
       log.warn(`LLM request failed (${e.message}); retrying in ${Math.round(wait / 1e3)}s`);
       await sleep(wait);
     }
@@ -12859,7 +12897,7 @@ var OpenAIChat = class {
   async chat(req) {
     const maxTokens = req.maxTokens ?? 8e3;
     const body2 = {
-      model: this.model,
+      model: req.model ?? this.model,
       messages: [
         { role: "system", content: req.system },
         { role: "user", content: req.user }
@@ -12874,7 +12912,7 @@ var OpenAIChat = class {
     if (/\.azure\.com/.test(this.baseUrl)) headers["api-key"] = this.apiKey;
     let res;
     try {
-      res = await postJson(url, body2, headers);
+      res = await postJson(url, body2, headers, { deadline: req.deadline });
     } catch (e) {
       if (e instanceof HttpError && e.status === 400 && /max_(completion_)?tokens/.test(e.body)) {
         this.useCompletionTokens = !completionTokens;
@@ -12882,7 +12920,7 @@ var OpenAIChat = class {
         delete body2.max_completion_tokens;
         if (this.useCompletionTokens) body2.max_completion_tokens = maxTokens * 3;
         else body2.max_tokens = maxTokens;
-        res = await postJson(url, body2, headers);
+        res = await postJson(url, body2, headers, { deadline: req.deadline });
       } else throw e;
     }
     const text = res.choices?.[0]?.message?.content ?? "";
@@ -12938,12 +12976,13 @@ Respond with a single valid JSON object and nothing else.` : req.system;
     const res = await postJson(
       `${this.baseUrl.replace(/\/$/, "")}/messages`,
       {
-        model: this.model,
+        model: req.model ?? this.model,
         max_tokens: req.maxTokens ?? 8e3,
         system,
         messages: [{ role: "user", content: req.user }]
       },
-      { "x-api-key": this.apiKey, "anthropic-version": "2023-06-01" }
+      { "x-api-key": this.apiKey, "anthropic-version": "2023-06-01" },
+      { deadline: req.deadline }
     );
     const text = res.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
     if (!text.trim()) throw new Error(`Claude returned an empty response (stop_reason=${res.stop_reason})`);
@@ -12967,13 +13006,14 @@ var GeminiChat = class {
     const generationConfig = { maxOutputTokens: (req.maxTokens ?? 8e3) * 3 };
     if (req.json) generationConfig.responseMimeType = "application/json";
     const res = await postJson(
-      `${GEMINI_BASE}/models/${encodeURIComponent(this.model)}:generateContent`,
+      `${GEMINI_BASE}/models/${encodeURIComponent(req.model ?? this.model)}:generateContent`,
       {
         systemInstruction: { parts: [{ text: req.system }] },
         contents: [{ role: "user", parts: [{ text: req.user }] }],
         generationConfig
       },
-      { "x-goog-api-key": this.apiKey }
+      { "x-goog-api-key": this.apiKey },
+      { deadline: req.deadline }
     );
     const cand = res.candidates?.[0];
     const text = (cand?.content?.parts ?? []).filter((p) => !p.thought).map((p) => p.text ?? "").join("");
@@ -13122,14 +13162,6 @@ var MockEmbedder = class {
   }
 };
 
-// src/llm/types.ts
-var BudgetExceededError = class extends Error {
-  constructor(msg) {
-    super(msg);
-    this.name = "BudgetExceededError";
-  }
-};
-
 // src/llm/index.ts
 var DEFAULT_MODELS = {
   openai: "gpt-5.5",
@@ -13162,13 +13194,17 @@ function resolveProvider(cfg, keys) {
   );
 }
 var TrackedLLM = class {
-  constructor(inner, maxTotalInputTokens) {
+  constructor(inner, maxTotalInputTokens, deadline) {
     this.inner = inner;
     this.maxTotalInputTokens = maxTotalInputTokens;
+    this.deadline = deadline;
   }
   inner;
   maxTotalInputTokens;
+  deadline;
   usage = { calls: 0, inputTokens: 0, outputTokens: 0, embeddingTexts: 0 };
+  /** Estimated input tokens of calls in flight, so concurrent calls cannot all pass the budget check. */
+  reserved = 0;
   get provider() {
     return this.inner.provider;
   }
@@ -13177,13 +13213,23 @@ var TrackedLLM = class {
   }
   async chat(req) {
     const approx = Math.ceil((req.system.length + req.user.length) / 4);
-    if (this.usage.inputTokens + approx > this.maxTotalInputTokens) {
+    const deadline = req.deadline ?? this.deadline;
+    if (deadline && Date.now() >= deadline) {
+      throw new DeadlineExceededError("Run deadline reached (limits.max_run_seconds); skipping remaining LLM calls");
+    }
+    if (this.usage.inputTokens + this.reserved + approx > this.maxTotalInputTokens) {
       throw new BudgetExceededError(
         `Token budget reached (${this.usage.inputTokens.toLocaleString()} / ${this.maxTotalInputTokens.toLocaleString()} input tokens). Raise limits.max_total_input_tokens to review more.`
       );
     }
+    this.reserved += approx;
     const t0 = Date.now();
-    const res = await this.inner.chat(req);
+    let res;
+    try {
+      res = await this.inner.chat({ ...req, deadline });
+    } finally {
+      this.reserved -= approx;
+    }
     const dump = process.env.AMCHI_DUMP_PROMPTS;
     if (dump) {
       mkdirSync3(dump, { recursive: true });
@@ -13207,7 +13253,7 @@ ${res.text}
     return res;
   }
 };
-function createLLM(cfg, keys) {
+function createLLM(cfg, keys, opts = {}) {
   const provider = resolveProvider(cfg, keys);
   const model = cfg.model || DEFAULT_MODELS[provider];
   let inner;
@@ -13229,18 +13275,24 @@ function createLLM(cfg, keys) {
       inner = new MockChat();
       break;
   }
-  log.info(`LLM: ${provider} / ${model}`);
-  return new TrackedLLM(inner, cfg.limits.max_total_input_tokens);
+  log.info(`LLM: ${provider} / ${model}${cfg.verify_model ? ` (verify: ${cfg.verify_model})` : ""}`);
+  return new TrackedLLM(inner, cfg.limits.max_total_input_tokens, opts.deadline);
 }
 function createEmbedder(cfg, keys) {
   let choice = cfg.embeddings;
   if (choice === "off") return null;
   if (cfg.provider === "mock") return new MockEmbedder();
   if (choice === "auto") {
-    if (keys.openai && !(cfg.provider === "openai" && cfg.base_url)) choice = "openai";
-    else if (keys.gemini) choice = "gemini";
+    let provider = null;
+    try {
+      provider = resolveProvider(cfg, keys);
+    } catch {
+    }
+    if (provider === "openai" && keys.openai && !cfg.base_url) choice = "openai";
+    else if (provider === "gemini" && keys.gemini) choice = "gemini";
     else {
-      log.info("Embeddings: off (no OpenAI or Gemini key) \u2014 using keyword + graph retrieval");
+      const hint = keys.openai || keys.gemini ? ` Set embeddings: ${keys.openai ? "openai" : "gemini"} to send code chunks to that vendor for semantic search.` : "";
+      log.info(`Embeddings: off (auto only uses the review provider's own embeddings).${hint} Using keyword + graph retrieval.`);
       return null;
     }
   }
@@ -13411,6 +13463,7 @@ function renderSummary(out2, meta, state, opts = {}) {
   const notes = [];
   if (out2.failed.length) notes.push(`\u26A0\uFE0F Review failed for ${out2.failed.length} file(s): ${out2.failed.map((p) => `\`${p}\``).join(", ")}`);
   if (out2.budgetHit) notes.push("\u26A0\uFE0F Token budget reached \u2014 some files were not reviewed (raise `limits.max_total_input_tokens`).");
+  if (out2.deadlineHit) notes.push("\u26A0\uFE0F Run deadline reached \u2014 some files were not reviewed; the next run will cover them (raise `limits.max_run_seconds`).");
   const limitSkipped = out2.skipped.filter((x) => x.reason === "max_files limit");
   if (limitSkipped.length) notes.push(`\u2139\uFE0F ${limitSkipped.length} file(s) skipped by \`review.max_files\`.`);
   if (out2.dropped > 0) notes.push(`\u2139\uFE0F ${out2.dropped} lower-priority finding(s) not posted (thresholds / \`max_comments\`).`);
@@ -13423,7 +13476,7 @@ function renderSummary(out2, meta, state, opts = {}) {
     `<sub>Reviews (${reviews}) \xB7 Last reviewed commit: ${commit} \xB7 Reviewed by ${meta.botName ?? "Amchi"}</sub>`,
     `<sub>${range2} \xB7 ${meta.provider}/${meta.model} \xB7 ${u.calls} LLM call(s), ${fmtK(u.inputTokens)} in / ${fmtK(u.outputTokens)} out tokens \xB7 Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`
   );
-  const complete = !out2.failed.length && !out2.budgetHit;
+  const complete = !out2.failed.length && !out2.budgetHit && !out2.deadlineHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
   L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");
@@ -13794,12 +13847,80 @@ ${s.body}`;
 function fingerprint(path2, title) {
   return shortHash(`${path2}|${title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
 }
+function relatedGroups(candidates, graph) {
+  const paths = new Set(candidates.map((f) => f.path));
+  const parent = new Map(candidates.map((f) => [f.path, f.path]));
+  const find = (p) => {
+    while (parent.get(p) !== p) {
+      parent.set(p, parent.get(parent.get(p)));
+      p = parent.get(p);
+    }
+    return p;
+  };
+  const union = (a, b) => parent.set(find(a), find(b));
+  for (const f of candidates) {
+    for (const r of graph.file(f.path)?.resolved ?? []) if (paths.has(r)) union(f.path, r);
+    for (const i of graph.importersOf(f.path)) if (paths.has(i)) union(f.path, i);
+    const seen = /* @__PURE__ */ new Set();
+    for (const [s, e] of changedRanges(f)) {
+      for (const sym of graph.symbolsOverlapping(f.path, s, e)) {
+        if (seen.has(sym.name) || COMMON_NAMES.has(sym.name)) continue;
+        seen.add(sym.name);
+        const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
+        for (const c of graph.callersOf(sym.name)) {
+          if (c.path !== f.path && paths.has(c.path) && (unique || graph.dependsOn(c.path, f.path))) union(f.path, c.path);
+        }
+      }
+    }
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (const f of candidates) (groups.get(find(f.path)) ?? groups.set(find(f.path), []).get(find(f.path))).push(f);
+  return [...groups.values()];
+}
+function planBatches(candidates, graph, maxDiffPerBatch, maxFiles = 5) {
+  const size = (f) => f.additions + f.deletions;
+  const render = (f) => {
+    let d = renderDiffForModel(f);
+    let t = estimateTokens(d);
+    if (t > maxDiffPerBatch) {
+      d = truncateTokens(d, maxDiffPerBatch);
+      t = maxDiffPerBatch;
+      log.warn(`Diff for ${f.path} is very large; reviewing a truncated version`);
+    }
+    return { f, d, t };
+  };
+  const groups = relatedGroups(candidates, graph).map((g) => {
+    const files = g.sort((a, b) => size(b) - size(a)).map(render);
+    return { files, tokens: files.reduce((n, x) => n + x.t, 0) };
+  }).sort((a, b) => b.tokens - a.tokens || b.files.length - a.files.length);
+  const batches = [];
+  let cur = { files: [], diffs: /* @__PURE__ */ new Map(), diffTokens: 0 };
+  const flush = () => {
+    if (cur.files.length) batches.push(cur);
+    cur = { files: [], diffs: /* @__PURE__ */ new Map(), diffTokens: 0 };
+  };
+  for (const g of groups) {
+    const fits = cur.files.length + g.files.length <= maxFiles && cur.diffTokens + g.tokens <= maxDiffPerBatch;
+    if (cur.files.length && !fits) flush();
+    for (const { f, d, t } of g.files) {
+      if (cur.files.length && (cur.diffTokens + t > maxDiffPerBatch || cur.files.length >= maxFiles)) flush();
+      cur.files.push(f);
+      cur.diffs.set(f.path, d);
+      cur.diffTokens += t;
+    }
+  }
+  flush();
+  return batches;
+}
 async function reviewPullRequest(input) {
   const { cfg, graph, searcher, llm, pr } = input;
   const skipped = [];
   const failed = [];
   let budgetHit = false;
+  let deadlineHit = false;
+  const timings = { context: 0, review: 0, verify: 0, summary: 0 };
   const prPaths = new Set(input.files.map((f) => f.path));
+  const pastDeadline = () => !!input.deadline && Date.now() >= input.deadline;
   let candidates = [];
   for (const f of input.files) {
     if (f.binary) skipped.push({ path: f.path, reason: "binary" });
@@ -13814,10 +13935,10 @@ async function reviewPullRequest(input) {
     candidates = candidates.slice(0, cfg.review.max_files);
   }
   const outside = [];
-  for (const f of (input.allFiles ?? input.files).filter((x) => x.status === "deleted" || x.status === "renamed" && x.oldPath)) {
-    const gone = f.status === "deleted" ? f.path : f.oldPath;
-    if (graph.file(gone)) continue;
-    const importers = graph.importersOfMissing(gone);
+  const goneFiles = (input.allFiles ?? input.files).filter((x) => x.status === "deleted" || x.status === "renamed" && x.oldPath).map((f) => ({ f, gone: f.status === "deleted" ? f.path : f.oldPath })).filter(({ gone }) => !graph.file(gone));
+  const importersByGone = graph.importersOfMissingMany(goneFiles.map((g) => g.gone));
+  for (const { f, gone } of goneFiles) {
+    const importers = importersByGone.get(gone) ?? [];
     if (importers.length) {
       const title = `\`${gone}\` was ${f.status === "deleted" ? "deleted" : "moved"} but is still imported`;
       outside.push({
@@ -13836,30 +13957,18 @@ async function reviewPullRequest(input) {
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + 2500;
   const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
-  const batches = [];
-  let cur = { files: [], diffs: /* @__PURE__ */ new Map(), diffTokens: 0 };
-  for (const f of candidates) {
-    let d = renderDiffForModel(f);
-    let t = estimateTokens(d);
-    if (t > maxDiffPerBatch) {
-      d = truncateTokens(d, maxDiffPerBatch);
-      t = maxDiffPerBatch;
-      log.warn(`Diff for ${f.path} is very large; reviewing a truncated version`);
-    }
-    if (cur.files.length && (cur.diffTokens + t > maxDiffPerBatch || cur.files.length >= 5)) {
-      batches.push(cur);
-      cur = { files: [], diffs: /* @__PURE__ */ new Map(), diffTokens: 0 };
-    }
-    cur.files.push(f);
-    cur.diffs.set(f.path, d);
-    cur.diffTokens += t;
-  }
-  if (cur.files.length) batches.push(cur);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch);
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)`);
   const fileSummaries = { ...input.previousFileSummaries ?? {} };
   const raw = [];
   const batchPrompts = [];
+  const t0 = Date.now();
   await mapLimit(batches, cfg.limits.concurrency, async (batch, bi) => {
+    if (pastDeadline()) {
+      deadlineHit = true;
+      for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+      return;
+    }
     const ctxBudget = Math.max(
       1500,
       Math.floor((perCall - headerTokens - batch.diffTokens) * 0.9 / batch.files.length)
@@ -13871,11 +13980,13 @@ async function reviewPullRequest(input) {
     if (rulesText) parts.push(rulesText);
     for (const f of batch.files) {
       let ctx = "";
+      const tc = Date.now();
       try {
         ctx = await buildFileContext(f, graph, searcher, ctxBudget, prPaths);
       } catch (e) {
         log.warn(`Context retrieval failed for ${f.path}: ${e.message}`);
       }
+      timings.context += Date.now() - tc;
       parts.push(
         `
 ==================== FILE: ${f.path} (${f.status}${f.oldPath && f.oldPath !== f.path ? ` from ${f.oldPath}` : ""}) ====================
@@ -13914,15 +14025,22 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
         budgetHit = true;
         for (const f of batch.files) skipped.push({ path: f.path, reason: "token budget reached" });
         log.warn(e.message);
+      } else if (e instanceof DeadlineExceededError) {
+        deadlineHit = true;
+        for (const f of batch.files) skipped.push({ path: f.path, reason: "run deadline reached" });
+        log.warn(e.message);
       } else {
         failed.push(...batch.files.map((f) => f.path));
         log.warn(`Review call failed for ${batch.files.map((f) => f.path).join(", ")}: ${e.message}`);
       }
     }
   });
+  timings.review = Date.now() - t0;
   let findings = raw;
   if (input.verify && raw.length) {
+    const tv = Date.now();
     findings = await verifyFindings(llm, cfg, raw, batchPrompts);
+    timings.verify = Date.now() - tv;
   }
   const byPath = new Map(candidates.map((f) => [f.path, f]));
   const anchorByPath = new Map((input.anchorFiles ?? []).map((f) => [f.path, f]));
@@ -13944,13 +14062,24 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
   const outsideKept = dedupe(outside).filter((f) => severityRank(f.severity) >= minSev && f.confidence >= cfg.review.min_confidence);
   let summary = null;
   if (cfg.summary.enabled) {
+    const ts = Date.now();
     try {
-      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? []);
+      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + 9e4 : void 0;
+      summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
       log.warn(`Summary generation failed: ${e.message}`);
     }
+    timings.summary = Date.now() - ts;
   }
+  const funnel = {
+    raw: raw.length,
+    verified: findings.length,
+    anchored: inlineAll.length,
+    passing: passing.length,
+    capped: inline.length
+  };
+  log.info(`Findings funnel: ${renderFunnel(funnel)} \xB7 timings: ${renderTimings(timings)}`);
   return {
     inline,
     outside: outsideKept,
@@ -13960,8 +14089,25 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
     reviewed: candidates.filter((f) => !failed.includes(f.path) && !skipped.some((s) => s.path === f.path)),
     skipped,
     failed,
-    budgetHit
+    budgetHit,
+    deadlineHit,
+    funnel,
+    timings
   };
+}
+function renderFunnel(f) {
+  const parts = [`${f.raw} raw`, `${f.verified} verified`, `${f.anchored} anchored`, `${f.passing} passing`, `${f.capped} capped`];
+  if (f.posted !== void 0) parts.push(`${f.posted} posted`);
+  return parts.join(" \u2192 ");
+}
+function renderTimings(t) {
+  const s = (ms) => `${(ms / 1e3).toFixed(1)}s`;
+  const parts = [];
+  if (t.index !== void 0) parts.push(`index ${s(t.index)}`);
+  parts.push(`context ${s(t.context)}`, `review ${s(t.review)}`);
+  if (t.verify) parts.push(`verify ${s(t.verify)}`);
+  if (t.summary) parts.push(`summary ${s(t.summary)}`);
+  return parts.join(" \xB7 ");
 }
 function normalizeFinding(rf, files) {
   if (!rf || typeof rf.line !== "number" || !rf.title) return null;
@@ -14049,7 +14195,8 @@ async function verifyFindings(llm, cfg, raw, prompts) {
 ${list}`,
         json: true,
         maxTokens: 2e3,
-        label: `verify:${bi}`
+        label: `verify:${bi}`,
+        model: cfg.verify_model
       });
       const parsed = parseModelJson(res.text);
       const keep = new Map((parsed.keep ?? []).map((k) => [k.id, k.confidence]));
@@ -14066,7 +14213,7 @@ ${list}`,
   log.info(`Verification kept ${kept.length}/${raw.length} findings`);
   return kept;
 }
-async function summarize(llm, cfg, pr, files, fileSummaries, findings, commits) {
+async function summarize(llm, cfg, pr, files, fileSummaries, findings, commits, deadline) {
   const fileLines = files.slice(0, 150).map((f) => `- ${f.path} (${f.status}, +${f.additions}/-${f.deletions})${fileSummaries[f.path] ? `: ${fileSummaries[f.path]}` : ""}`).join("\n");
   const findingLines = findings.length ? findings.map((f) => `- [${f.severity}] ${f.path}:${f.line} ${f.title}`).join("\n") : "(no issues found)";
   const user = `# ${pr.title}
@@ -14087,7 +14234,8 @@ ${findingLines}`;
     user: truncateTokens(user, 3e4),
     json: true,
     maxTokens: 3e3,
-    label: "summary"
+    label: "summary",
+    deadline
   });
   const s = parseModelJson(res.text);
   return {
@@ -14147,9 +14295,11 @@ async function runReview(input) {
       llm: input.llm,
       cfg,
       commits,
-      verify: cfg.review.verify
+      verify: cfg.review.verify,
+      deadline: input.deadline
     })
   );
+  if (!input.workspace) out2.timings.index = workspace.stats.ms;
   return { out: out2, allFiles, reviewFiles, mergeBase, incrementalFrom, workspace };
 }
 
@@ -14265,11 +14415,12 @@ async function main() {
     if (git.run(["status", "--porcelain", "--untracked-files=no"], { allowFail: true }).trim()) {
       log.warn("You have uncommitted changes; they are indexed for context but not reviewed. Commit them to review them.");
     }
-    const llm = createLLM(cfg, keys);
+    const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1e3 : void 0;
+    const llm = createLLM(cfg, keys, { deadline });
     const embedder = createEmbedder(cfg, keys);
     const title = str(flags2.title) ?? git.run(["log", "-1", "--format=%s", headSha]).trim();
     const body2 = git.run(["log", "-1", "--format=%b", headSha]).trim();
-    const res = await runReview({ root, cfg, llm, embedder, baseSha, headSha, title, body: body2 });
+    const res = await runReview({ root, cfg, llm, embedder, baseSha, headSha, title, body: body2, deadline });
     if (flags2.json) {
       output(JSON.stringify({ ...res.out, reviewed: res.out.reviewed.map((f) => f.path), usage: llm.usage }, null, 2), flags2);
     } else {
@@ -14288,6 +14439,7 @@ async function main() {
       );
     }
     log.info(`LLM usage: ${llm.usage.calls} call(s), ${llm.usage.inputTokens.toLocaleString()} in / ${llm.usage.outputTokens.toLocaleString()} out tokens`);
+    log.info(`Findings funnel: ${renderFunnel(res.out.funnel)} \xB7 timings: ${renderTimings(res.out.timings)}`);
     return;
   }
   throw new Error(`Unknown command "${cmd}". Run with --help.`);

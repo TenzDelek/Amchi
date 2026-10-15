@@ -107,6 +107,11 @@ describe("providers", () => {
     expect(createLLM(cfg, { anthropic: "a", openai: "o" }).provider).toBe("anthropic");
     expect(() => createLLM(cfg, {})).toThrow(/No LLM API key/);
     expect(createEmbedder(cfg, { anthropic: "a" })).toBeNull();
-    expect(createEmbedder(cfg, { anthropic: "a", gemini: "g" })?.provider).toBe("gemini");
+    // auto never sends code to a vendor other than the review provider.
+    expect(createEmbedder(cfg, { anthropic: "a", gemini: "g" })).toBeNull();
+    expect(createEmbedder(cfg, { anthropic: "a", openai: "o" })).toBeNull();
+    expect(createEmbedder(cfg, { gemini: "g" })?.provider).toBe("gemini");
+    expect(createEmbedder(cfg, { openai: "o", gemini: "g" })?.provider).toBe("openai");
+    expect(createEmbedder(loadConfig("/nonexistent", undefined, { embeddings: "gemini" }), { anthropic: "a", gemini: "g" })?.provider).toBe("gemini");
   });
 });

@@ -19,6 +19,8 @@ export interface ReviewRunInput {
   incrementalFrom?: string;
   previousFileSummaries?: Record<string, string>;
   workspace?: Workspace;
+  /** Epoch ms after which no new LLM batch is started (partial results are still returned). */
+  deadline?: number;
 }
 
 export interface ReviewRunResult {
@@ -86,7 +88,9 @@ export async function runReview(input: ReviewRunInput): Promise<ReviewRunResult>
       cfg,
       commits,
       verify: cfg.review.verify,
+      deadline: input.deadline,
     }),
   );
+  if (!input.workspace) out.timings.index = workspace.stats.ms;
   return { out, allFiles, reviewFiles, mergeBase, incrementalFrom, workspace };
 }

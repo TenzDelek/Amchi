@@ -9,7 +9,7 @@ import { openWorkspace } from "./graph/workspace.js";
 import { createEmbedder, createLLM, keysFromEnv, type TrackedLLM } from "./llm/index.js";
 import { MARKER_PREFIX_RE, renderSummary, parseState, setBadgeStyle, type ReviewState } from "./review/render.js";
 import { runReview } from "./run.js";
-import { similar } from "./review/reviewer.js";
+import { renderFunnel, renderTimings, similar } from "./review/reviewer.js";
 import { isAbsolute } from "node:path";
 import { log, setVerbose } from "./util/log.js";
 import { relaunchWithBaselineWasm } from "./util/relaunch.js";
@@ -31,7 +31,10 @@ function configOverrides(): Partial<Config> {
   if (input("fail_on")) review.fail_on = input("fail_on");
   if (Object.keys(review).length) o.review = review;
   if (input("trigger")) o.chat = { trigger: input("trigger") };
-  if (input("max_total_input_tokens")) o.limits = { max_total_input_tokens: Number(input("max_total_input_tokens")) };
+  const limits: Record<string, unknown> = {};
+  if (input("max_total_input_tokens")) limits.max_total_input_tokens = Number(input("max_total_input_tokens"));
+  if (input("max_run_seconds")) limits.max_run_seconds = Number(input("max_run_seconds"));
+  if (Object.keys(limits).length) o.limits = limits;
   return o as Partial<Config>;
 }
 
@@ -243,7 +246,9 @@ async function reviewPr(
     }
   }
 
-  const llm = createLLM(cfg, keys);
+  // The LLM phase gets a wall-clock budget so partial results are posted before the job's own timeout kills the run.
+  const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
+  const llm = createLLM(cfg, keys, { deadline });
   const embedder = createEmbedder(cfg, keys);
   const res = await runReview({
     root,
@@ -256,6 +261,7 @@ async function reviewPr(
     body: pr.body,
     incrementalFrom,
     previousFileSummaries: incrementalFrom ? state.files : undefined,
+    deadline,
   });
   const { out } = res;
 
@@ -269,6 +275,7 @@ async function reviewPr(
       !posted.some((p) => p.path === f.path && Math.abs(p.line - (f.endLine ?? f.line)) <= 3 && similar(p.title, f.title)),
   );
   if (fresh.length < out.inline.length) log.info(`Skipping ${out.inline.length - fresh.length} finding(s) already posted earlier`);
+  out.funnel.posted = fresh.length;
 
   const threshold = cfg.review.request_changes_on;
   const blocking = threshold !== "none" && fresh.some((f) => severityRank(f.severity) >= severityRank(threshold as Severity));
@@ -307,12 +314,17 @@ async function reviewPr(
   );
   await gh.upsertSummary(pr.number, summary, existing?.id);
   logUsage(llm);
+  log.info(`Findings funnel: ${renderFunnel(out.funnel)} · timings: ${renderTimings(out.timings)}`);
 
   core.setOutput("findings", out.inline.length + out.outside.length);
   core.setOutput("confidence", out.summary?.confidence ?? "");
   core.setOutput("input_tokens", llm.usage.inputTokens);
   core.setOutput("output_tokens", llm.usage.outputTokens);
-  await core.summary.addRaw(summary.replace(/<!--.*?-->/gs, "")).write().catch(() => undefined);
+  await core.summary
+    .addRaw(summary.replace(/<!--.*?-->/gs, ""))
+    .addRaw(`\n\n<sub>Findings funnel: ${renderFunnel(out.funnel)} · ${renderTimings(out.timings)}</sub>\n`)
+    .write()
+    .catch(() => undefined);
 
   const failOn = cfg.review.fail_on;
   if (failOn !== "none") {

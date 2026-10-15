@@ -243,6 +243,7 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   const notes: string[] = [];
   if (out.failed.length) notes.push(`⚠️ Review failed for ${out.failed.length} file(s): ${out.failed.map((p) => `\`${p}\``).join(", ")}`);
   if (out.budgetHit) notes.push("⚠️ Token budget reached — some files were not reviewed (raise `limits.max_total_input_tokens`).");
+  if (out.deadlineHit) notes.push("⚠️ Run deadline reached — some files were not reviewed; the next run will cover them (raise `limits.max_run_seconds`).");
   const limitSkipped = out.skipped.filter((x) => x.reason === "max_files limit");
   if (limitSkipped.length) notes.push(`ℹ️ ${limitSkipped.length} file(s) skipped by \`review.max_files\`.`);
   if (out.dropped > 0) notes.push(`ℹ️ ${out.dropped} lower-priority finding(s) not posted (thresholds / \`max_comments\`).`);
@@ -261,7 +262,7 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
       `Ask a question with \`${meta.trigger} <question>\`, re-run with \`${meta.trigger} review\`.</sub>`,
   );
   // If anything wasn't reviewed, keep the old lastSha so the next run covers it again.
-  const complete = !out.failed.length && !out.budgetHit;
+  const complete = !out.failed.length && !out.budgetHit && !out.deadlineHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
   L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
   return L.join("\n");

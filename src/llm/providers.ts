@@ -23,7 +23,7 @@ export class OpenAIChat implements LLM {
   async chat(req: ChatRequest): Promise<ChatResult> {
     const maxTokens = req.maxTokens ?? 8000;
     const body: Record<string, unknown> = {
-      model: this.model,
+      model: req.model ?? this.model,
       messages: [
         { role: "system", content: req.system },
         { role: "user", content: req.user },
@@ -45,7 +45,7 @@ export class OpenAIChat implements LLM {
     if (/\.azure\.com/.test(this.baseUrl)) headers["api-key"] = this.apiKey;
     let res: Resp;
     try {
-      res = await postJson<Resp>(url, body, headers);
+      res = await postJson<Resp>(url, body, headers, { deadline: req.deadline });
     } catch (e) {
       // Retry once with the other token parameter if the server rejects ours.
       if (e instanceof HttpError && e.status === 400 && /max_(completion_)?tokens/.test(e.body)) {
@@ -54,7 +54,7 @@ export class OpenAIChat implements LLM {
         delete body.max_completion_tokens;
         if (this.useCompletionTokens) body.max_completion_tokens = maxTokens * 3;
         else body.max_tokens = maxTokens;
-        res = await postJson<Resp>(url, body, headers);
+        res = await postJson<Resp>(url, body, headers, { deadline: req.deadline });
       } else throw e;
     }
     const text = res.choices?.[0]?.message?.content ?? "";
@@ -117,12 +117,13 @@ export class AnthropicChat implements LLM {
     const res = await postJson<Resp>(
       `${this.baseUrl.replace(/\/$/, "")}/messages`,
       {
-        model: this.model,
+        model: req.model ?? this.model,
         max_tokens: req.maxTokens ?? 8000,
         system,
         messages: [{ role: "user", content: req.user }],
       },
       { "x-api-key": this.apiKey, "anthropic-version": "2023-06-01" },
+      { deadline: req.deadline },
     );
     const text = res.content
       .filter((c) => c.type === "text")
@@ -159,13 +160,14 @@ export class GeminiChat implements LLM {
       promptFeedback?: { blockReason?: string };
     };
     const res = await postJson<Resp>(
-      `${GEMINI_BASE}/models/${encodeURIComponent(this.model)}:generateContent`,
+      `${GEMINI_BASE}/models/${encodeURIComponent(req.model ?? this.model)}:generateContent`,
       {
         systemInstruction: { parts: [{ text: req.system }] },
         contents: [{ role: "user", parts: [{ text: req.user }] }],
         generationConfig,
       },
       { "x-goog-api-key": this.apiKey },
+      { deadline: req.deadline },
     );
     const cand = res.candidates?.[0];
     const text = (cand?.content?.parts ?? [])

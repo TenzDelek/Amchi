@@ -38,7 +38,7 @@ flowchart LR
 
 1. **Index.** It parses every source file with tree-sitter (WASM, no native build) into symbols, call edges and resolved imports. The index is cached in `.amchi/` through `actions/cache`, so later runs only re-parse changed files. Embeddings, if enabled, are cached by content hash and only computed for new code.
 2. **Retrieve.** For each changed file it gathers the enclosing functions after the change, the definitions of functions the new code calls, callers of the changed functions, references to removed functions, importers and related tests, plus a hybrid (BM25 + embedding) search for similar code. Everything is packed into a token budget by priority.
-3. **Review.** It sends small files together and large files alone. The model returns structured JSON. Every finding is checked against the real diff lines GitHub will accept, deduplicated, filtered by severity and confidence, and capped.
+3. **Review.** Files that depend on each other (imports, callers of changed functions) are sent in the same call so a signature change is reviewed next to its updated callers; small files share calls and large files go alone. The model returns structured JSON. Every finding is checked against the real diff lines GitHub will accept, deduplicated, filtered by severity and confidence, and capped.
 4. **Post.** Findings go out as one review with inline comments, and the summary comment is created or updated. Each comment carries a hidden fingerprint so re-runs never duplicate it.
 
 Supported languages (full graph): TypeScript, TSX, JavaScript, Python, Go, Rust, Java, Kotlin, Dart/Flutter, C, C++, C#, PHP, Swift, Scala, Lua. Other text files (Ruby, SQL, YAML, Markdown, Vue, etc.) are still reviewed and searchable without the call graph.
@@ -58,7 +58,7 @@ git tag v2 && git push origin v2
 
 `dist/` is committed on purpose because GitHub runs the action from it. If the action repo is private, allow access in its *Settings → Actions → General → Access* so your other repos can use it.
 
-**2. Add an API key secret** to the repo (or org) being reviewed: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY`. One is enough. An OpenAI or Gemini key also turns on semantic search.
+**2. Add an API key secret** to the repo (or org) being reviewed: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `GEMINI_API_KEY`. One is enough. Reviewing with OpenAI or Gemini also turns on semantic search with that same vendor's embeddings; with Claude, set `embeddings: openai` or `gemini` if you want to send code chunks to a second vendor for it.
 
 **3. Add the workflow.** Copy [`examples/workflow.yml`](examples/workflow.yml) to `.github/workflows/code-review.yml` and replace `YOUR_ORG`. Optionally copy [`examples/.codereview.yml`](examples/.codereview.yml) to the repo root.
 
@@ -77,16 +77,17 @@ Everything lives in `.codereview.yml`; see [the annotated example](examples/.cod
 | `instructions` | – | Extra guidance added to every prompt. |
 | `review.min_severity` | `low` | Raise to `medium` for fewer, higher-signal comments. |
 | `review.max_comments` | `15` | Cap on inline comments per run. |
-| `review.verify` | `false` | Second pass that removes false positives (about 2x tokens). |
+| `review.verify` | `false` | Second pass that removes false positives (about 2x tokens). `verify_model` runs it on a cheaper model. |
 | `review.incremental` | `true` | Only review new commits on later pushes. |
 | `review.fail_on` | `none` | Fail the check (to block merging) on e.g. `high`. |
 | `review.badges` | `image` | `text` swaps the colored P0–P4 badge images for plain `[P1]` labels (for runners without internet access). |
 | `limits.max_total_input_tokens` | `1,500,000` | Hard stop per run. Protects against giant PRs. |
-| `embeddings` | `auto` | `off` uses keyword + graph retrieval only, with no embedding calls. |
+| `limits.max_run_seconds` | `900` | Wall-clock budget for LLM calls. Files not reviewed in time are skipped, the partial review is posted, and the next run covers the rest. Keep it under the job's `timeout-minutes`. |
+| `embeddings` | `auto` | `auto` embeds only with the review provider's own API (OpenAI or Gemini), so code never goes to a second vendor unless you name one. `off` uses keyword + graph retrieval only. |
 
 ## Controlling cost
 
-Every summary ends with the exact number of LLM calls and input/output tokens for that run, so you can compare with your provider's pricing. Typical patterns:
+Every summary ends with the exact number of LLM calls and input/output tokens for that run, so you can compare with your provider's pricing. The job summary and log also print a findings funnel (raw → verified → anchored → passing → capped → posted) and per-stage timings, so you can see where findings are lost and where time goes. Typical patterns:
 
 - A normal PR (5–10 files) is usually **1–3 review calls plus 1 summary call**, about 20–60k input tokens in total.
 - Incremental pushes only send the new commits.
