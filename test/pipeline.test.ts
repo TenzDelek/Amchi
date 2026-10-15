@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { parseUnifiedDiff } from "../src/git/diff.js";
 import { buildIndex, CodeGraph } from "../src/graph/indexer.js";
-import { TrackedLLM } from "../src/llm/index.js";
+import { CALL_GRACE_MS, createEmbedder, TrackedLLM } from "../src/llm/index.js";
+import { parseState, renderSummary } from "../src/review/render.js";
 import { BudgetExceededError, DeadlineExceededError, type ChatRequest, type LLM } from "../src/llm/types.js";
 import { MockChat } from "../src/llm/mock.js";
 import { planBatches, relatedGroups, reviewPullRequest } from "../src/review/reviewer.js";
@@ -68,7 +69,55 @@ describe("batch planning by graph affinity", () => {
       expect(relatedGroups(files, graph)).toHaveLength(1);
       const batches = planBatches(files, graph, 100_000, 5);
       expect(batches.map((b) => b.files.length)).toEqual([5, 2]);
+      // The hub (the file every other one depends on) leads the first batch.
+      expect(batches[0].files[0].path).toBe("src/a.ts");
       expect(batches.flatMap((b) => b.files.map((f) => f.path)).sort()).toEqual(files.map((f) => f.path).sort());
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe("batch planning: caller edges and priority", () => {
+  it("links a changed function to a changed caller even without an import edge", async () => {
+    const repo = new TempRepo();
+    try {
+      repo.write({
+        "src/a.ts": "function uniqueHelperName(x: number) { return x; }\n",
+        "src/b.ts": "function useIt() { return uniqueHelperName(1); }\n",
+        "src/c.ts": "export function other() { return 1; }\n",
+      });
+      const base = repo.commit("init");
+      repo.write({
+        "src/a.ts": "function uniqueHelperName(x: number, y = 0) { return x + y; }\n",
+        "src/b.ts": "function useIt() { return uniqueHelperName(1, 2); }\n",
+        "src/c.ts": "export function other() { return 2; }\n",
+      });
+      const head = repo.commit("change");
+      const { graph } = await graphFor(repo);
+      const files = diffs(repo, base, head);
+      const groups = relatedGroups(files, graph).map((g) => g.map((f) => f.path).sort());
+      expect(groups).toContainEqual(["src/a.ts", "src/b.ts"]);
+      expect(groups).toContainEqual(["src/c.ts"]);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it("schedules groups with left-over files from the previous run first", async () => {
+    const repo = new TempRepo();
+    try {
+      repo.write({ "src/big.ts": "export function big() { return 1; }\n", "src/small.ts": "export function small() { return 1; }\n" });
+      const base = repo.commit("init");
+      repo.write({
+        "src/big.ts": "export function big() { return 2; }\nexport function big2() { return 3; }\nexport function big3() { return 4; }\n",
+        "src/small.ts": "export function small() { return 2; }\n",
+      });
+      const head = repo.commit("change");
+      const { graph } = await graphFor(repo);
+      const files = diffs(repo, base, head);
+      expect(planBatches(files, graph, 100_000, 1).map((b) => b.files[0].path)).toEqual(["src/big.ts", "src/small.ts"]);
+      expect(planBatches(files, graph, 100_000, 1, new Set(["src/small.ts"])).map((b) => b.files[0].path)).toEqual(["src/small.ts", "src/big.ts"]);
     } finally {
       repo.cleanup();
     }
@@ -99,13 +148,29 @@ describe("TrackedLLM budget and deadline", () => {
     expect(inner.calls).toHaveLength(2);
   });
 
-  it("refuses calls after the deadline and forwards it to the provider", async () => {
+  it("refuses calls after the deadline but lets started calls run into the grace period", async () => {
     const inner = new SlowLLM();
     const future = new TrackedLLM(inner, 1e9, Date.now() + 60_000);
     await future.chat({ system: "", user: "hi" });
-    expect(inner.calls[0].deadline).toBe(future.deadline);
+    expect(inner.calls[0].deadline).toBe(future.deadline! + CALL_GRACE_MS);
     const past = new TrackedLLM(inner, 1e9, Date.now() - 1);
     await expect(past.chat({ system: "", user: "hi" })).rejects.toBeInstanceOf(DeadlineExceededError);
+  });
+});
+
+describe("embedder and config guards", () => {
+  it("gives embedders the run deadline plus grace", () => {
+    const cfg = loadConfig("/nonexistent", undefined, { embeddings: "gemini" });
+    const emb = createEmbedder(cfg, { gemini: "g" }, { deadline: 1000 });
+    expect(emb?.deadline).toBe(1000 + CALL_GRACE_MS);
+    expect(createEmbedder(cfg, { gemini: "g" })?.deadline).toBeUndefined();
+  });
+
+  it("falls back to default limits for NaN or negative values", () => {
+    const cfg = loadConfig("/nonexistent", undefined, { limits: { max_run_seconds: Number.NaN, max_total_input_tokens: -5 } as never });
+    expect(cfg.limits.max_run_seconds).toBe(900);
+    expect(cfg.limits.max_total_input_tokens).toBe(1_500_000);
+    expect(loadConfig("/nonexistent", undefined, { limits: { max_run_seconds: 0 } as never }).limits.max_run_seconds).toBe(0);
   });
 });
 
@@ -136,6 +201,57 @@ describe("review deadline", () => {
       repo.cleanup();
     }
   });
+
+  it("keeps findings but reports them as unverified when the verify pass hits the deadline", async () => {
+    const repo = new TempRepo();
+    try {
+      repo.write({ "src/a.ts": "export function a() { return 1; }\n" });
+      const base = repo.commit("init");
+      repo.write({ "src/a.ts": "export function a() { console.log(1); return 1; }\n" });
+      const head = repo.commit("change");
+      const { cfg, graph } = await graphFor(repo);
+      const files = diffs(repo, base, head);
+      const searcher = new Searcher(buildChunks(graph));
+      const mock = new MockChat();
+      const llm: LLM = {
+        provider: "mock",
+        model: "mock",
+        chat: async (req) => {
+          if (req.label?.startsWith("verify:")) throw new DeadlineExceededError("deadline");
+          return mock.chat(req);
+        },
+      };
+      const out = await reviewPullRequest({ files, pr: { title: "t", body: "", changedFiles: [] }, graph, searcher, llm, cfg, verify: true });
+      expect(out.inline).toHaveLength(1);
+      expect(out.unverified).toBe(1);
+      expect(out.deadlineHit).toBe(false); // the review itself completed; only verification was cut short
+      const md = renderSummary(
+        out,
+        { baseSha: base, headSha: head, provider: "mock", model: "m", usage: { calls: 1, inputTokens: 1, outputTokens: 1, embeddingTexts: 0 }, trigger: "@amchi", allFiles: files },
+        {},
+      );
+      expect(md).toContain("posted without the verification pass");
+      expect(parseState(md).lastSha).toBe(head);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it("records unreviewed files in the state comment so the next run can schedule them first", () => {
+    const base = { inline: [], outside: [], dropped: 0, fileSummaries: {}, summary: null, reviewed: [], budgetHit: false, unverified: 0, funnel: { raw: 0, verified: 0, anchored: 0, passing: 0, capped: 0 }, timings: { context: 0, review: 0, verify: 0, summary: 0 } };
+    const meta = { baseSha: "1".repeat(40), headSha: "2".repeat(40), provider: "mock", model: "m", usage: { calls: 1, inputTokens: 1, outputTokens: 1, embeddingTexts: 0 }, trigger: "@amchi", allFiles: [] };
+    const partial = renderSummary(
+      { ...base, skipped: [{ path: "x.ts", reason: "run deadline reached" }, { path: "y.ts", reason: "ignored by config" }], failed: ["z.ts"], deadlineHit: true },
+      meta,
+      { lastSha: "0".repeat(40) },
+    );
+    const st = parseState(partial);
+    expect(st.pending?.sort()).toEqual(["x.ts", "z.ts"]);
+    expect(st.lastSha).toBe("0".repeat(40));
+    const complete = renderSummary({ ...base, skipped: [], failed: [], deadlineHit: false }, meta, { pending: ["x.ts"] });
+    expect(parseState(complete).pending).toBeUndefined();
+    expect(parseState(complete).lastSha).toBe("2".repeat(40));
+  });
 });
 
 describe("importersOfMissingMany", () => {
@@ -148,7 +264,7 @@ describe("importersOfMissingMany", () => {
       });
       repo.commit("init");
       const { graph } = await graphFor(repo);
-      const many = graph.importersOfMissingMany(["src/gone.ts", "src/also.ts", "src/x.ts"]);
+      const many = graph.importersOfMissingMany(["src/gone.ts", "src/also.ts", "src/x.ts", "src/gone.ts"]);
       expect(many.get("src/gone.ts")).toEqual(["src/x.ts"]);
       expect(many.get("src/also.ts")?.sort()).toEqual(["src/x.ts", "src/y.ts"]);
       expect(many.get("src/x.ts")).toEqual([]); // exists: real importers (none)

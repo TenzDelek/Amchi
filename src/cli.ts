@@ -117,7 +117,7 @@ async function main() {
     }
     const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
     const llm = createLLM(cfg, keys, { deadline });
-    const embedder = createEmbedder(cfg, keys);
+    const embedder = createEmbedder(cfg, keys, { deadline });
     const title = str(flags.title) ?? git.run(["log", "-1", "--format=%s", headSha]).trim();
     const body = git.run(["log", "-1", "--format=%b", headSha]).trim();
     const res = await runReview({ root, cfg, llm, embedder, baseSha, headSha, title, body, deadline });

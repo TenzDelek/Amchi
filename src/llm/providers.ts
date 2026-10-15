@@ -72,6 +72,7 @@ export class OpenAIChat implements LLM {
 export class OpenAIEmbedder implements Embedder {
   readonly provider = "openai";
   readonly batchSize = 128;
+  deadline?: number;
   constructor(
     private apiKey: string,
     readonly model: string,
@@ -88,7 +89,7 @@ export class OpenAIEmbedder implements Embedder {
     type Resp = { data: { index: number; embedding: number[] }[] };
     const res = await postJson<Resp>(`${this.baseUrl.replace(/\/$/, "")}/embeddings`, body, {
       authorization: `Bearer ${this.apiKey}`,
-    });
+    }, { deadline: this.deadline });
     return [...res.data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
   }
 }
@@ -190,6 +191,7 @@ export class GeminiChat implements LLM {
 export class GeminiEmbedder implements Embedder {
   readonly provider = "gemini";
   readonly batchSize = 100;
+  deadline?: number;
   constructor(
     private apiKey: string,
     readonly model: string,
@@ -209,6 +211,7 @@ export class GeminiEmbedder implements Embedder {
         })),
       },
       { "x-goog-api-key": this.apiKey },
+      { deadline: this.deadline },
     );
     return res.embeddings.map((e) => e.values);
   }

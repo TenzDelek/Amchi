@@ -29,6 +29,8 @@ export interface Embedder {
   readonly model: string;
   /** Max texts per request. */
   readonly batchSize: number;
+  /** Epoch ms; set by the run so embedding calls cannot outlive it. */
+  deadline?: number;
   embed(texts: string[]): Promise<number[][]>;
 }
 
@@ -40,8 +42,8 @@ export class BudgetExceededError extends Error {
 }
 
 export class DeadlineExceededError extends Error {
-  constructor(msg: string) {
-    super(msg);
+  constructor(msg: string, opts?: { cause?: unknown }) {
+    super(msg, opts);
     this.name = "DeadlineExceededError";
   }
 }

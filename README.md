@@ -82,7 +82,7 @@ Everything lives in `.codereview.yml`; see [the annotated example](examples/.cod
 | `review.fail_on` | `none` | Fail the check (to block merging) on e.g. `high`. |
 | `review.badges` | `image` | `text` swaps the colored P0–P4 badge images for plain `[P1]` labels (for runners without internet access). |
 | `limits.max_total_input_tokens` | `1,500,000` | Hard stop per run. Protects against giant PRs. |
-| `limits.max_run_seconds` | `900` | Wall-clock budget for LLM calls. Files not reviewed in time are skipped, the partial review is posted, and the next run covers the rest. Keep it under the job's `timeout-minutes`. |
+| `limits.max_run_seconds` | `900` | Wall-clock budget for the run, indexing included. Files not reviewed in time are skipped, the partial review is posted, and the next run reviews them first. Keep it under the job's `timeout-minutes`. |
 | `embeddings` | `auto` | `auto` embeds only with the review provider's own API (OpenAI or Gemini), so code never goes to a second vendor unless you name one. `off` uses keyword + graph retrieval only. |
 
 ## Controlling cost

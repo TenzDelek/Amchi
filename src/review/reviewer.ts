@@ -72,6 +72,8 @@ export interface ReviewOutput {
   budgetHit: boolean;
   /** `limits.max_run_seconds` ran out before every batch was reviewed. */
   deadlineHit: boolean;
+  /** Findings posted without the verify pass because the deadline or budget cut it short. */
+  unverified: number;
   funnel: Funnel;
   timings: Timings;
 }
@@ -94,6 +96,8 @@ export interface ReviewInput {
   verify?: boolean;
   /** Epoch ms after which no new review batch is started. */
   deadline?: number;
+  /** Files a previous run could not review; their groups are scheduled first. */
+  priorityPaths?: string[];
 }
 
 interface RawFinding {
@@ -125,7 +129,14 @@ export interface Batch {
 
 /** Changed files that depend on each other: imports between them, or one calls a symbol the other changes. */
 export function relatedGroups(candidates: FileDiff[], graph: CodeGraph): FileDiff[][] {
+  return affinity(candidates, graph).groups;
+}
+
+/** Connected components of the changed files plus each file's number of links inside the PR. */
+function affinity(candidates: FileDiff[], graph: CodeGraph): { groups: FileDiff[][]; degree: Map<string, number> } {
   const paths = new Set(candidates.map((f) => f.path));
+  const degree = new Map(candidates.map((f) => [f.path, 0]));
+  const edges = new Set<string>();
   const parent = new Map(candidates.map((f) => [f.path, f.path]));
   const find = (p: string): string => {
     while (parent.get(p) !== p) {
@@ -134,7 +145,15 @@ export function relatedGroups(candidates: FileDiff[], graph: CodeGraph): FileDif
     }
     return p;
   };
-  const union = (a: string, b: string) => parent.set(find(a), find(b));
+  const union = (a: string, b: string) => {
+    parent.set(find(a), find(b));
+    const key = a < b ? `${a}\0${b}` : `${b}\0${a}`;
+    if (!edges.has(key)) {
+      edges.add(key);
+      degree.set(a, degree.get(a)! + 1);
+      degree.set(b, degree.get(b)! + 1);
+    }
+  };
   for (const f of candidates) {
     for (const r of graph.file(f.path)?.resolved ?? []) if (paths.has(r)) union(f.path, r);
     for (const i of graph.importersOf(f.path)) if (paths.has(i)) union(f.path, i);
@@ -153,15 +172,24 @@ export function relatedGroups(candidates: FileDiff[], graph: CodeGraph): FileDif
   }
   const groups = new Map<string, FileDiff[]>();
   for (const f of candidates) (groups.get(find(f.path)) ?? groups.set(find(f.path), []).get(find(f.path))!).push(f);
-  return [...groups.values()];
+  return { groups: [...groups.values()], degree };
 }
 
 /**
  * Pack files into LLM calls. Files that depend on each other go into the same
  * call where they fit, so a signature change and its updated callers are
- * reviewed together; groups are then filled greedily by diff size.
+ * reviewed together; groups are then filled greedily by diff size. Groups that
+ * contain `priority` paths (left over from an earlier run) go first. Inside a
+ * group the most-connected files come first, so when a group has to be split the
+ * hub lands in the first batch with its closest callers.
  */
-export function planBatches(candidates: FileDiff[], graph: CodeGraph, maxDiffPerBatch: number, maxFiles = 5): Batch[] {
+export function planBatches(
+  candidates: FileDiff[],
+  graph: CodeGraph,
+  maxDiffPerBatch: number,
+  maxFiles = 5,
+  priority: Set<string> = new Set(),
+): Batch[] {
   const size = (f: FileDiff) => f.additions + f.deletions;
   const render = (f: FileDiff) => {
     let d = renderDiffForModel(f);
@@ -173,12 +201,14 @@ export function planBatches(candidates: FileDiff[], graph: CodeGraph, maxDiffPer
     }
     return { f, d, t };
   };
-  const groups = relatedGroups(candidates, graph)
+  const { groups: raw, degree } = affinity(candidates, graph);
+  const groups = raw
     .map((g) => {
-      const files = g.sort((a, b) => size(b) - size(a)).map(render);
-      return { files, tokens: files.reduce((n, x) => n + x.t, 0) };
+      const files = g.sort((a, b) => degree.get(b.path)! - degree.get(a.path)! || size(b) - size(a)).map(render);
+      const urgent = g.filter((f) => priority.has(f.path)).length;
+      return { files, urgent, tokens: files.reduce((n, x) => n + x.t, 0) };
     })
-    .sort((a, b) => b.tokens - a.tokens || b.files.length - a.files.length);
+    .sort((a, b) => b.urgent - a.urgent || b.tokens - a.tokens || b.files.length - a.files.length);
 
   const batches: Batch[] = [];
   let cur: Batch = { files: [], diffs: new Map(), diffTokens: 0 };
@@ -255,8 +285,10 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + 2500; // + system prompt
   const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
-  const batches = planBatches(candidates, graph, maxDiffPerBatch);
-  log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)`);
+  const priority = new Set(input.priorityPaths ?? []);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch, 5, priority);
+  const carried = candidates.filter((f) => priority.has(f.path)).length;
+  log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
 
   // ---- 3. review each batch -------------------------------------------------
   const fileSummaries: Record<string, string> = { ...(input.previousFileSummaries ?? {}) };
@@ -335,9 +367,10 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
 
   // ---- 4. optional verification pass ----------------------------------------
   let findings = raw;
+  let unverified = 0;
   if (input.verify && raw.length) {
     const tv = Date.now();
-    findings = await verifyFindings(llm, cfg, raw, batchPrompts);
+    ({ kept: findings, unverified } = await verifyFindings(llm, cfg, raw, batchPrompts));
     timings.verify = Date.now() - tv;
   }
 
@@ -396,6 +429,7 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
     failed,
     budgetHit,
     deadlineHit,
+    unverified,
     funnel,
     timings,
   };
@@ -500,11 +534,18 @@ async function verifyFindings(
   cfg: Config,
   raw: { finding: Finding; batch: number }[],
   prompts: string[],
-): Promise<{ finding: Finding; batch: number }[]> {
+): Promise<{ kept: { finding: Finding; batch: number }[]; unverified: number }> {
   const byBatch = new Map<number, { finding: Finding; batch: number; id: number }[]>();
   raw.forEach((r, id) => (byBatch.get(r.batch) ?? byBatch.set(r.batch, []).get(r.batch)!).push({ ...r, id }));
   const kept: { finding: Finding; batch: number }[] = [];
+  let unverified = 0;
+  let stopped: string | null = null; // deadline or budget: skip the remaining verify calls, keep findings as they are
   await mapLimit([...byBatch.entries()], cfg.limits.concurrency, async ([bi, items]) => {
+    if (stopped) {
+      unverified += items.length;
+      kept.push(...items);
+      return;
+    }
     const list = items
       .map((r) => `${r.id}. [${r.finding.severity}] ${r.finding.path}:${r.finding.line} — ${r.finding.title}\n   ${r.finding.body.replace(/\n/g, "\n   ")}`)
       .join("\n");
@@ -525,12 +566,17 @@ async function verifyFindings(
         kept.push({ batch: r.batch, finding: { ...r.finding, confidence: typeof c === "number" ? c : r.finding.confidence } });
       }
     } catch (e) {
+      if (e instanceof DeadlineExceededError || e instanceof BudgetExceededError) {
+        stopped = e.message;
+        unverified += items.length;
+      }
       log.warn(`Verification failed for batch ${bi}, keeping its findings: ${(e as Error).message}`);
       kept.push(...items);
     }
   });
+  if (stopped) log.warn(`Verification stopped early (${stopped}); ${unverified} finding(s) are posted unverified`);
   log.info(`Verification kept ${kept.length}/${raw.length} findings`);
-  return kept;
+  return { kept, unverified };
 }
 
 async function summarize(

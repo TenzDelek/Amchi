@@ -31,7 +31,11 @@ the context builder (the name is unique in the repo, or the caller imports the
 file). Components are ordered by total diff size, files within a component by
 size. A component that does not fit in the remaining space of the current batch
 starts a fresh batch, so it stays together where possible. Components larger
-than one batch are split with the old size rule.
+than one batch are split with the old size rule, after ordering the component's
+files by how many links they have inside the PR, so the hub file lands in the
+first batch with its closest callers. Files in later sub-batches still see the
+hub's new definitions through the context builder, but not its diff. Components
+containing files a previous run could not review go first (see ADR-002).
 
 Implemented in `relatedGroups` and `planBatches` in `src/review/reviewer.ts`.
 
@@ -91,6 +95,9 @@ batching, is the limiting factor.
 
 - Easier: the model sees a change and its in-PR callers together.
 - Harder: predicting batch count from file count; tests that assumed size order.
+- Known limit: a component that spans several batches loses the hub's diff in
+  all but the first batch; a PR touching a well-connected module degenerates to
+  size packing.
 - Revisit: whether to add the PR-wide preamble (Option C) once the findings
   funnel is populated on real PRs; whether `maxFiles = 5` is still the right cap
   when batches are related.

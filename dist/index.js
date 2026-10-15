@@ -34901,6 +34901,14 @@ function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   const cfg = deepMerge(deepMerge(DEFAULT_CONFIG, fileCfg), overrides);
   cfg.rules = (cfg.rules ?? []).map((r) => typeof r === "string" ? { rule: r } : r);
   if (!SEVERITY_ORDER.includes(cfg.review.min_severity)) cfg.review.min_severity = "low";
+  const limits = cfg.limits;
+  for (const [k, def] of Object.entries(DEFAULT_CONFIG.limits)) {
+    const v = limits[k];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+      if (v !== void 0) log.warn(`limits.${k} must be a non-negative number; using ${def}`);
+      limits[k] = def;
+    }
+  }
   if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
 }
@@ -35516,7 +35524,8 @@ function encodeState(s) {
     size += add;
   }
   const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-500));
-  return JSON.stringify({ ...s, files, issues }).replace(/--/g, "&#45;&#45;");
+  const pending = s.pending?.length ? s.pending.slice(0, 200) : void 0;
+  return JSON.stringify({ ...s, files, issues, pending }).replace(/--/g, "&#45;&#45;");
 }
 function escapeInline(s) {
   return s.replace(/\r?\n/g, " ");
@@ -35588,7 +35597,8 @@ function renderSummary(out2, meta, state, opts = {}) {
   const notes = [];
   if (out2.failed.length) notes.push(`\u26A0\uFE0F Review failed for ${out2.failed.length} file(s): ${out2.failed.map((p) => `\`${p}\``).join(", ")}`);
   if (out2.budgetHit) notes.push("\u26A0\uFE0F Token budget reached \u2014 some files were not reviewed (raise `limits.max_total_input_tokens`).");
-  if (out2.deadlineHit) notes.push("\u26A0\uFE0F Run deadline reached \u2014 some files were not reviewed; the next run will cover them (raise `limits.max_run_seconds`).");
+  if (out2.deadlineHit) notes.push("\u26A0\uFE0F Run deadline reached \u2014 some files were not reviewed; the next run reviews them first (raise `limits.max_run_seconds`).");
+  if (out2.unverified > 0) notes.push(`\u26A0\uFE0F ${out2.unverified} finding(s) were posted without the verification pass (deadline or token budget reached).`);
   const limitSkipped = out2.skipped.filter((x) => x.reason === "max_files limit");
   if (limitSkipped.length) notes.push(`\u2139\uFE0F ${limitSkipped.length} file(s) skipped by \`review.max_files\`.`);
   if (out2.dropped > 0) notes.push(`\u2139\uFE0F ${out2.dropped} lower-priority finding(s) not posted (thresholds / \`max_comments\`).`);
@@ -35603,7 +35613,8 @@ function renderSummary(out2, meta, state, opts = {}) {
   );
   const complete = !out2.failed.length && !out2.budgetHit && !out2.deadlineHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
+  const pending = complete ? [] : [...out2.failed, ...out2.skipped.filter((s2) => /deadline|budget/.test(s2.reason)).map((s2) => s2.path)];
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
   return L.join("\n");
 }
 function rank(s) {
@@ -36776,7 +36787,11 @@ var CodeGraph = class {
   importersOfMissing(path2) {
     return this.importersOfMissingMany([path2]).get(path2) ?? [];
   }
-  /** Same as `importersOfMissing` for many paths, with a single pass over the repo's imports. */
+  /**
+   * Same as `importersOfMissing` for many paths, with a single pass over the repo's
+   * imports. All missing paths are resolved together, as they coexisted before the
+   * PR: if both `a.ts` and `a/index.ts` were deleted, `./a` counts for `a.ts` only.
+   */
   importersOfMissingMany(paths) {
     const out2 = /* @__PURE__ */ new Map();
     const missing = paths.filter((p) => {
@@ -37042,8 +37057,8 @@ var BudgetExceededError = class extends Error {
   }
 };
 var DeadlineExceededError = class extends Error {
-  constructor(msg) {
-    super(msg);
+  constructor(msg, opts) {
+    super(msg, opts);
     this.name = "DeadlineExceededError";
   }
 };
@@ -37067,17 +37082,18 @@ async function postJson(url, body2, headers, opts = {}) {
   const attempts = opts.attempts ?? 6;
   const timeoutMs = opts.timeoutMs ?? 24e4;
   const remaining = () => opts.deadline ? opts.deadline - Date.now() : Infinity;
+  const deadlineError = (cause, when) => new DeadlineExceededError(`Run deadline reached ${when}${cause ? `: ${cause.message}` : ""}`, { cause });
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    if (remaining() <= 0) {
-      throw lastErr ?? new DeadlineExceededError("Run deadline reached before the request could start");
-    }
+    if (remaining() <= 0) throw deadlineError(lastErr, lastErr ? "while retrying" : "before the request could start");
+    const budget = Math.max(1e3, Math.min(timeoutMs, remaining()));
+    const cappedByDeadline = budget < timeoutMs;
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify(body2),
-        signal: AbortSignal.timeout(Math.max(1e3, Math.min(timeoutMs, remaining())))
+        signal: AbortSignal.timeout(budget)
       });
       const text = await res.text();
       if (res.ok) return JSON.parse(text);
@@ -37086,16 +37102,17 @@ async function postJson(url, body2, headers, opts = {}) {
       lastErr = err2;
       const retryAfter = Number(res.headers.get("retry-after"));
       const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1e3, 6e4) : backoff(attempt);
-      if (wait > remaining()) throw new DeadlineExceededError(`Run deadline reached while retrying: ${err2.message}`);
+      if (wait > remaining()) throw deadlineError(err2, "while retrying");
       log.warn(`LLM request got ${res.status}; retrying in ${Math.round(wait / 1e3)}s (attempt ${attempt}/${attempts})`);
       await sleep(wait);
     } catch (e) {
       if (e instanceof DeadlineExceededError) throw e;
       if (e instanceof HttpError && !RETRYABLE.has(e.status)) throw e;
+      if (remaining() <= 0 || cappedByDeadline && e.name === "TimeoutError") throw deadlineError(e, "during the request");
       if (attempt === attempts) throw e;
       lastErr = e;
       const wait = backoff(attempt);
-      if (wait > remaining()) throw new DeadlineExceededError(`Run deadline reached while retrying: ${e.message}`);
+      if (wait > remaining()) throw deadlineError(e, "while retrying");
       log.warn(`LLM request failed (${e.message}); retrying in ${Math.round(wait / 1e3)}s`);
       await sleep(wait);
     }
@@ -37175,6 +37192,7 @@ var OpenAIEmbedder = class {
   dimensions;
   provider = "openai";
   batchSize = 128;
+  deadline;
   async embed(texts) {
     const body2 = {
       model: this.model,
@@ -37183,7 +37201,7 @@ var OpenAIEmbedder = class {
     if (/text-embedding-3/.test(this.model)) body2.dimensions = this.dimensions;
     const res = await postJson(`${this.baseUrl.replace(/\/$/, "")}/embeddings`, body2, {
       authorization: `Bearer ${this.apiKey}`
-    });
+    }, { deadline: this.deadline });
     return [...res.data].sort((a, b) => a.index - b.index).map((d) => d.embedding);
   }
 };
@@ -37268,6 +37286,7 @@ var GeminiEmbedder = class {
   dimensions;
   provider = "gemini";
   batchSize = 100;
+  deadline;
   async embed(texts) {
     const name = this.model.startsWith("models/") ? this.model : `models/${this.model}`;
     const res = await postJson(
@@ -37279,7 +37298,8 @@ var GeminiEmbedder = class {
           outputDimensionality: this.dimensions
         }))
       },
-      { "x-goog-api-key": this.apiKey }
+      { "x-goog-api-key": this.apiKey },
+      { deadline: this.deadline }
     );
     return res.embeddings.map((e) => e.values);
   }
@@ -37421,6 +37441,7 @@ function resolveProvider(cfg, keys) {
     "No LLM API key found. Set one of OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY (or the matching action input)."
   );
 }
+var CALL_GRACE_MS = 9e4;
 var TrackedLLM = class {
   constructor(inner, maxTotalInputTokens, deadline) {
     this.inner = inner;
@@ -37454,7 +37475,7 @@ var TrackedLLM = class {
     const t0 = Date.now();
     let res;
     try {
-      res = await this.inner.chat({ ...req, deadline });
+      res = await this.inner.chat({ ...req, deadline: deadline ? deadline + CALL_GRACE_MS : void 0 });
     } finally {
       this.reserved -= approx;
     }
@@ -37506,7 +37527,12 @@ function createLLM(cfg, keys, opts = {}) {
   log.info(`LLM: ${provider} / ${model}${cfg.verify_model ? ` (verify: ${cfg.verify_model})` : ""}`);
   return new TrackedLLM(inner, cfg.limits.max_total_input_tokens, opts.deadline);
 }
-function createEmbedder(cfg, keys) {
+function createEmbedder(cfg, keys, opts = {}) {
+  const emb = pickEmbedder(cfg, keys);
+  if (emb && opts.deadline) emb.deadline = opts.deadline + CALL_GRACE_MS;
+  return emb;
+}
+function pickEmbedder(cfg, keys) {
   let choice = cfg.embeddings;
   if (choice === "off") return null;
   if (cfg.provider === "mock") return new MockEmbedder();
@@ -37519,7 +37545,8 @@ function createEmbedder(cfg, keys) {
     if (provider === "openai" && keys.openai && !cfg.base_url) choice = "openai";
     else if (provider === "gemini" && keys.gemini) choice = "gemini";
     else {
-      const hint = keys.openai || keys.gemini ? ` Set embeddings: ${keys.openai ? "openai" : "gemini"} to send code chunks to that vendor for semantic search.` : "";
+      const vendor = keys.openai && !cfg.base_url ? "openai" : keys.gemini ? "gemini" : null;
+      const hint = vendor ? ` Set embeddings: ${vendor} to send code chunks to that vendor for semantic search.` : "";
       log.info(`Embeddings: off (auto only uses the review provider's own embeddings).${hint} Using keyword + graph retrieval.`);
       return null;
     }
@@ -37886,8 +37913,10 @@ ${s.body}`;
 function fingerprint(path2, title) {
   return shortHash(`${path2}|${title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
 }
-function relatedGroups(candidates, graph) {
+function affinity(candidates, graph) {
   const paths = new Set(candidates.map((f) => f.path));
+  const degree = new Map(candidates.map((f) => [f.path, 0]));
+  const edges = /* @__PURE__ */ new Set();
   const parent = new Map(candidates.map((f) => [f.path, f.path]));
   const find = (p) => {
     while (parent.get(p) !== p) {
@@ -37896,7 +37925,15 @@ function relatedGroups(candidates, graph) {
     }
     return p;
   };
-  const union = (a, b) => parent.set(find(a), find(b));
+  const union = (a, b) => {
+    parent.set(find(a), find(b));
+    const key = a < b ? `${a}\0${b}` : `${b}\0${a}`;
+    if (!edges.has(key)) {
+      edges.add(key);
+      degree.set(a, degree.get(a) + 1);
+      degree.set(b, degree.get(b) + 1);
+    }
+  };
   for (const f of candidates) {
     for (const r of graph.file(f.path)?.resolved ?? []) if (paths.has(r)) union(f.path, r);
     for (const i of graph.importersOf(f.path)) if (paths.has(i)) union(f.path, i);
@@ -37914,9 +37951,9 @@ function relatedGroups(candidates, graph) {
   }
   const groups = /* @__PURE__ */ new Map();
   for (const f of candidates) (groups.get(find(f.path)) ?? groups.set(find(f.path), []).get(find(f.path))).push(f);
-  return [...groups.values()];
+  return { groups: [...groups.values()], degree };
 }
-function planBatches(candidates, graph, maxDiffPerBatch, maxFiles = 5) {
+function planBatches(candidates, graph, maxDiffPerBatch, maxFiles = 5, priority = /* @__PURE__ */ new Set()) {
   const size = (f) => f.additions + f.deletions;
   const render = (f) => {
     let d = renderDiffForModel(f);
@@ -37928,10 +37965,12 @@ function planBatches(candidates, graph, maxDiffPerBatch, maxFiles = 5) {
     }
     return { f, d, t };
   };
-  const groups = relatedGroups(candidates, graph).map((g) => {
-    const files = g.sort((a, b) => size(b) - size(a)).map(render);
-    return { files, tokens: files.reduce((n, x) => n + x.t, 0) };
-  }).sort((a, b) => b.tokens - a.tokens || b.files.length - a.files.length);
+  const { groups: raw, degree } = affinity(candidates, graph);
+  const groups = raw.map((g) => {
+    const files = g.sort((a, b) => degree.get(b.path) - degree.get(a.path) || size(b) - size(a)).map(render);
+    const urgent = g.filter((f) => priority.has(f.path)).length;
+    return { files, urgent, tokens: files.reduce((n, x) => n + x.t, 0) };
+  }).sort((a, b) => b.urgent - a.urgent || b.tokens - a.tokens || b.files.length - a.files.length);
   const batches = [];
   let cur = { files: [], diffs: /* @__PURE__ */ new Map(), diffTokens: 0 };
   const flush = () => {
@@ -37996,8 +38035,10 @@ async function reviewPullRequest(input2) {
   const header = renderPrHeader(pr);
   const headerTokens = estimateTokens(header) + 2500;
   const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
-  const batches = planBatches(candidates, graph, maxDiffPerBatch);
-  log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)`);
+  const priority = new Set(input2.priorityPaths ?? []);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch, 5, priority);
+  const carried = candidates.filter((f) => priority.has(f.path)).length;
+  log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
   const fileSummaries = { ...input2.previousFileSummaries ?? {} };
   const raw = [];
   const batchPrompts = [];
@@ -38076,9 +38117,10 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
   });
   timings.review = Date.now() - t0;
   let findings = raw;
+  let unverified = 0;
   if (input2.verify && raw.length) {
     const tv = Date.now();
-    findings = await verifyFindings(llm, cfg, raw, batchPrompts);
+    ({ kept: findings, unverified } = await verifyFindings(llm, cfg, raw, batchPrompts));
     timings.verify = Date.now() - tv;
   }
   const byPath = new Map(candidates.map((f) => [f.path, f]));
@@ -38130,6 +38172,7 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
     failed,
     budgetHit,
     deadlineHit,
+    unverified,
     funnel,
     timings
   };
@@ -38222,7 +38265,14 @@ async function verifyFindings(llm, cfg, raw, prompts) {
   const byBatch = /* @__PURE__ */ new Map();
   raw.forEach((r, id) => (byBatch.get(r.batch) ?? byBatch.set(r.batch, []).get(r.batch)).push({ ...r, id }));
   const kept = [];
+  let unverified = 0;
+  let stopped = null;
   await mapLimit([...byBatch.entries()], cfg.limits.concurrency, async ([bi, items]) => {
+    if (stopped) {
+      unverified += items.length;
+      kept.push(...items);
+      return;
+    }
     const list = items.map((r) => `${r.id}. [${r.finding.severity}] ${r.finding.path}:${r.finding.line} \u2014 ${r.finding.title}
    ${r.finding.body.replace(/\n/g, "\n   ")}`).join("\n");
     try {
@@ -38245,12 +38295,17 @@ ${list}`,
         kept.push({ batch: r.batch, finding: { ...r.finding, confidence: typeof c === "number" ? c : r.finding.confidence } });
       }
     } catch (e) {
+      if (e instanceof DeadlineExceededError || e instanceof BudgetExceededError) {
+        stopped = e.message;
+        unverified += items.length;
+      }
       log.warn(`Verification failed for batch ${bi}, keeping its findings: ${e.message}`);
       kept.push(...items);
     }
   });
+  if (stopped) log.warn(`Verification stopped early (${stopped}); ${unverified} finding(s) are posted unverified`);
   log.info(`Verification kept ${kept.length}/${raw.length} findings`);
-  return kept;
+  return { kept, unverified };
 }
 async function summarize(llm, cfg, pr, files, fileSummaries, findings, commits, deadline) {
   const fileLines = files.slice(0, 150).map((f) => `- ${f.path} (${f.status}, +${f.additions}/-${f.deletions})${fileSummaries[f.path] ? `: ${fileSummaries[f.path]}` : ""}`).join("\n");
@@ -38335,7 +38390,8 @@ async function runReview(input2) {
       cfg,
       commits,
       verify: cfg.review.verify,
-      deadline: input2.deadline
+      deadline: input2.deadline,
+      priorityPaths: input2.priorityPaths
     })
   );
   if (!input2.workspace) out2.timings.index = workspace.stats.ms;
@@ -38379,8 +38435,18 @@ function configOverrides() {
   if (Object.keys(review).length) o.review = review;
   if (input("trigger")) o.chat = { trigger: input("trigger") };
   const limits = {};
-  if (input("max_total_input_tokens")) limits.max_total_input_tokens = Number(input("max_total_input_tokens"));
-  if (input("max_run_seconds")) limits.max_run_seconds = Number(input("max_run_seconds"));
+  const num = (name) => {
+    const raw = input(name);
+    if (!raw) return void 0;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      log.warn(`Ignoring input ${name}="${raw}": expected a non-negative number`);
+      return void 0;
+    }
+    return n;
+  };
+  if (num("max_total_input_tokens") !== void 0) limits.max_total_input_tokens = num("max_total_input_tokens");
+  if (num("max_run_seconds") !== void 0) limits.max_run_seconds = num("max_run_seconds");
   if (Object.keys(limits).length) o.limits = limits;
   return o;
 }
@@ -38568,7 +38634,7 @@ async function reviewPr(gh, cfg, keys, root, pr, opts) {
   }
   const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1e3 : void 0;
   const llm = createLLM(cfg, keys, { deadline });
-  const embedder = createEmbedder(cfg, keys);
+  const embedder = createEmbedder(cfg, keys, { deadline });
   const res = await runReview({
     root,
     cfg,
@@ -38580,7 +38646,8 @@ async function reviewPr(gh, cfg, keys, root, pr, opts) {
     body: pr.body,
     incrementalFrom,
     previousFileSummaries: incrementalFrom ? state.files : void 0,
-    deadline
+    deadline,
+    priorityPaths: state.pending
   });
   const { out: out2 } = res;
   const posted = await gh.existingComments(pr.number);
@@ -38589,7 +38656,6 @@ async function reviewPr(gh, cfg, keys, root, pr, opts) {
     (f) => !postedFps.has(f.fingerprint) && !posted.some((p) => p.path === f.path && Math.abs(p.line - (f.endLine ?? f.line)) <= 3 && similar(p.title, f.title))
   );
   if (fresh.length < out2.inline.length) log.info(`Skipping ${out2.inline.length - fresh.length} finding(s) already posted earlier`);
-  out2.funnel.posted = fresh.length;
   const threshold = cfg.review.request_changes_on;
   const blocking = threshold !== "none" && fresh.some((f) => severityRank(f.severity) >= severityRank(threshold));
   const failedToPlace = await gh.postReview(
@@ -38599,6 +38665,7 @@ async function reviewPr(gh, cfg, keys, root, pr, opts) {
     blocking ? "REQUEST_CHANGES" : "COMMENT",
     fresh.length ? `Found ${fresh.length} issue(s) \u2014 see the summary comment for an overview.` : ""
   );
+  out2.funnel.posted = fresh.length - failedToPlace.length;
   out2.outside.push(...failedToPlace);
   out2.inline = out2.inline.filter((f) => !failedToPlace.includes(f));
   const commentUrls = {};

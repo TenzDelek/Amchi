@@ -20,6 +20,8 @@ export interface ReviewState {
   issues?: Record<string, Severity>;
   /** How many review runs have been posted on this PR. */
   reviews?: number;
+  /** Files the last run could not review (deadline, budget, failure); scheduled first next time. */
+  pending?: string[];
 }
 
 /**
@@ -137,7 +139,8 @@ function encodeState(s: ReviewState): string {
     size += add;
   }
   const issues = Object.fromEntries(Object.entries(s.issues ?? {}).slice(-500));
-  return JSON.stringify({ ...s, files, issues }).replace(/--/g, "&#45;&#45;");
+  const pending = s.pending?.length ? s.pending.slice(0, 200) : undefined;
+  return JSON.stringify({ ...s, files, issues, pending }).replace(/--/g, "&#45;&#45;");
 }
 
 function escapeInline(s: string) {
@@ -243,7 +246,8 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   const notes: string[] = [];
   if (out.failed.length) notes.push(`⚠️ Review failed for ${out.failed.length} file(s): ${out.failed.map((p) => `\`${p}\``).join(", ")}`);
   if (out.budgetHit) notes.push("⚠️ Token budget reached — some files were not reviewed (raise `limits.max_total_input_tokens`).");
-  if (out.deadlineHit) notes.push("⚠️ Run deadline reached — some files were not reviewed; the next run will cover them (raise `limits.max_run_seconds`).");
+  if (out.deadlineHit) notes.push("⚠️ Run deadline reached — some files were not reviewed; the next run reviews them first (raise `limits.max_run_seconds`).");
+  if (out.unverified > 0) notes.push(`⚠️ ${out.unverified} finding(s) were posted without the verification pass (deadline or token budget reached).`);
   const limitSkipped = out.skipped.filter((x) => x.reason === "max_files limit");
   if (limitSkipped.length) notes.push(`ℹ️ ${limitSkipped.length} file(s) skipped by \`review.max_files\`.`);
   if (out.dropped > 0) notes.push(`ℹ️ ${out.dropped} lower-priority finding(s) not posted (thresholds / \`max_comments\`).`);
@@ -264,7 +268,10 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
   // If anything wasn't reviewed, keep the old lastSha so the next run covers it again.
   const complete = !out.failed.length && !out.budgetHit && !out.deadlineHit;
   const lastSha = complete ? meta.headSha : state.lastSha;
-  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews })} -->`);
+  const pending = complete
+    ? []
+    : [...out.failed, ...out.skipped.filter((s) => /deadline|budget/.test(s.reason)).map((s) => s.path)];
+  L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
   return L.join("\n");
 }
 

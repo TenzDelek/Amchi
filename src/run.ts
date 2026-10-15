@@ -21,6 +21,8 @@ export interface ReviewRunInput {
   workspace?: Workspace;
   /** Epoch ms after which no new LLM batch is started (partial results are still returned). */
   deadline?: number;
+  /** Files the previous run left unreviewed; scheduled first. */
+  priorityPaths?: string[];
 }
 
 export interface ReviewRunResult {
@@ -89,6 +91,7 @@ export async function runReview(input: ReviewRunInput): Promise<ReviewRunResult>
       commits,
       verify: cfg.review.verify,
       deadline: input.deadline,
+      priorityPaths: input.priorityPaths,
     }),
   );
   if (!input.workspace) out.timings.index = workspace.stats.ms;

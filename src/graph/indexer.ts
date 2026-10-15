@@ -459,7 +459,11 @@ export class CodeGraph {
     return this.importersOfMissingMany([path]).get(path) ?? [];
   }
 
-  /** Same as `importersOfMissing` for many paths, with a single pass over the repo's imports. */
+  /**
+   * Same as `importersOfMissing` for many paths, with a single pass over the repo's
+   * imports. All missing paths are resolved together, as they coexisted before the
+   * PR: if both `a.ts` and `a/index.ts` were deleted, `./a` counts for `a.ts` only.
+   */
   importersOfMissingMany(paths: string[]): Map<string, string[]> {
     const out = new Map<string, string[]>();
     const missing = paths.filter((p) => {

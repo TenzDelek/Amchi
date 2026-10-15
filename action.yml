@@ -56,7 +56,7 @@ inputs:
     description: "Hard cap on input tokens per run — protects your bill on huge PRs."
     required: false
   max_run_seconds:
-    description: "Wall-clock budget for the LLM phase (default 900). Files not reviewed in time are skipped and picked up by the next run. Keep it below the job's timeout-minutes."
+    description: "Wall-clock budget for the run in seconds, indexing included (default 900). Files not reviewed in time are skipped and reviewed first on the next run. Keep it below the job's timeout-minutes."
     required: false
 
 outputs:

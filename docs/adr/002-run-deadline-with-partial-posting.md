@@ -22,20 +22,30 @@ partial results must be clearly marked and must not advance `lastSha`.
 
 ## Decision
 
-Give the LLM phase a wall-clock budget, `limits.max_run_seconds` (default 900,
-also an action input). The deadline is created at the start of a review and
-passed to:
+Give the run a wall-clock budget, `limits.max_run_seconds` (default 900, also
+an action input). The clock starts before indexing, because the job timeout it
+protects against counts indexing too. The deadline is passed to:
 
 - the batch scheduler, which skips batches not started by the deadline with the
   reason "run deadline reached";
 - `TrackedLLM`, which refuses to start a call past the deadline;
 - the HTTP layer, which caps each request timeout and each retry wait to the
-  time remaining and raises `DeadlineExceededError` instead of waiting past it.
+  time remaining and raises `DeadlineExceededError` (with the underlying error
+  as cause) for anything the deadline cut short;
+- the embedders, so query-time embedding during context retrieval cannot hold a
+  worker past the deadline.
+
+Only the start of a call is strict: a call that began before the deadline may
+run 90 seconds past it, because aborting it would waste input tokens the
+provider has already billed. The verify pass stops at the deadline and posts the
+remaining findings unverified, with a note in the summary.
 
 The summary call gets a 90 second grace period so a partial run still receives a
 confidence score. The summary comment shows a deadline note, `deadlineHit`
-keeps `lastSha` at its previous value, and the example workflow sets the step's
-`timeout-minutes` above the default deadline.
+keeps `lastSha` at its previous value, and the paths that were skipped or
+failed are stored in the state block as `pending`, so the next run schedules
+their groups first instead of repeating the same prefix of the PR. The example
+workflow sets the step's `timeout-minutes` above the default deadline.
 
 ## Options Considered
 
@@ -89,6 +99,7 @@ should be rare because the deadline is below the job timeout by design.
 
 ## Action Items
 
-1. [x] Implement the deadline in reviewer, `TrackedLLM`, and `postJson` with tests.
+1. [x] Implement the deadline in reviewer, `TrackedLLM`, embedders and `postJson` with tests.
+1. [x] Carry unreviewed paths in the state comment and schedule them first.
 2. [x] Document `max_run_seconds` and set `timeout-minutes` in the example workflow.
 3. [ ] Watch the "run deadline reached" note on real PRs and adjust the default.

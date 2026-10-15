@@ -60,4 +60,4 @@ limits:
   max_output_tokens: 8000
   max_total_input_tokens: 1500000   # hard stop per run
   concurrency: 4
-  max_run_seconds: 900              # wall-clock budget for LLM calls; unreviewed files are skipped and picked up next run
+  max_run_seconds: 900              # wall-clock budget for the run (indexing included); unreviewed files go first next run

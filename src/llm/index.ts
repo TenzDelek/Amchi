@@ -50,6 +50,13 @@ export function resolveProvider(cfg: Config, keys: Keys): ProviderName {
   );
 }
 
+/**
+ * How long a call that started before the deadline may keep running past it.
+ * Aborting an in-flight review call wastes the input tokens the provider has
+ * already billed, so only the *start* of a call is strict.
+ */
+export const CALL_GRACE_MS = 90_000;
+
 /** Tracks token usage across all calls and enforces the per-run budget and deadline. */
 export class TrackedLLM implements LLM {
   readonly usage: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, embeddingTexts: 0 };
@@ -83,7 +90,7 @@ export class TrackedLLM implements LLM {
     const t0 = Date.now();
     let res: ChatResult;
     try {
-      res = await this.inner.chat({ ...req, deadline });
+      res = await this.inner.chat({ ...req, deadline: deadline ? deadline + CALL_GRACE_MS : undefined });
     } finally {
       this.reserved -= approx;
     }
@@ -135,7 +142,13 @@ export function createLLM(cfg: Config, keys: Keys, opts: { deadline?: number } =
  * `auto` only uses the review provider's own embedding API, so repository code is
  * never sent to a second vendor unless `embeddings` names one explicitly.
  */
-export function createEmbedder(cfg: Config, keys: Keys): Embedder | null {
+export function createEmbedder(cfg: Config, keys: Keys, opts: { deadline?: number } = {}): Embedder | null {
+  const emb = pickEmbedder(cfg, keys);
+  if (emb && opts.deadline) emb.deadline = opts.deadline + CALL_GRACE_MS;
+  return emb;
+}
+
+function pickEmbedder(cfg: Config, keys: Keys): Embedder | null {
   let choice = cfg.embeddings;
   if (choice === "off") return null;
   if (cfg.provider === "mock") return new MockEmbedder();
@@ -149,7 +162,9 @@ export function createEmbedder(cfg: Config, keys: Keys): Embedder | null {
     if (provider === "openai" && keys.openai && !cfg.base_url) choice = "openai";
     else if (provider === "gemini" && keys.gemini) choice = "gemini";
     else {
-      const hint = keys.openai || keys.gemini ? ` Set embeddings: ${keys.openai ? "openai" : "gemini"} to send code chunks to that vendor for semantic search.` : "";
+      // With a custom base_url the OpenAI key belongs to that endpoint, so OpenAI embeddings are not an option.
+      const vendor = keys.openai && !cfg.base_url ? "openai" : keys.gemini ? "gemini" : null;
+      const hint = vendor ? ` Set embeddings: ${vendor} to send code chunks to that vendor for semantic search.` : "";
       log.info(`Embeddings: off (auto only uses the review provider's own embeddings).${hint} Using keyword + graph retrieval.`);
       return null;
     }

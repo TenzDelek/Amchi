@@ -18,7 +18,9 @@ permissions:
 
 concurrency:
   # Reviews of the same PR share one group so two runs never post the same finding twice:
-  # pushes replace each other, "@amchi review" waits for a running review. Questions get their own run.
+  # pushes replace each other and "@amchi review" waits for a running review. GitHub keeps only
+  # one queued job per group, so a waiting "@amchi review" is dropped if another push lands first
+  # (that push still gets its normal review). Questions get their own run.
   group: amchi-${{ (github.event.comment.id && !contains(github.event.comment.body, '@amchi review') && format('comment-{0}', github.event.comment.id)) || github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -38,11 +40,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || (github.event.issue.pull_request && format('refs/pull/{0}/head', github.event.issue.number)) || github.sha }}
 
       # Persist the code graph + embeddings between runs. Keyed by commit so re-runs
-      # of the same commit reuse one entry instead of writing a new one each time.
+      # of the same commit reuse one entry instead of writing a new one each time;
+      # comment-triggered runs have no PR sha in the event, so they get their own key.
       - uses: actions/cache@v5
         with:
           path: .amchi
-          key: amchi-${{ runner.os }}-${{ github.event.pull_request.head.sha || github.sha }}
+          key: amchi-${{ runner.os }}-${{ github.event.pull_request.head.sha || (github.event.issue.number && format('pr-{0}-{1}', github.event.issue.number, github.run_id)) || github.sha }}
           restore-keys: amchi-${{ runner.os }}-
 
       - uses: TenzDelek/Amchi@v2

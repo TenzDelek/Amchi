@@ -32,8 +32,18 @@ function configOverrides(): Partial<Config> {
   if (Object.keys(review).length) o.review = review;
   if (input("trigger")) o.chat = { trigger: input("trigger") };
   const limits: Record<string, unknown> = {};
-  if (input("max_total_input_tokens")) limits.max_total_input_tokens = Number(input("max_total_input_tokens"));
-  if (input("max_run_seconds")) limits.max_run_seconds = Number(input("max_run_seconds"));
+  const num = (name: string) => {
+    const raw = input(name);
+    if (!raw) return undefined;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      log.warn(`Ignoring input ${name}="${raw}": expected a non-negative number`);
+      return undefined;
+    }
+    return n;
+  };
+  if (num("max_total_input_tokens") !== undefined) limits.max_total_input_tokens = num("max_total_input_tokens");
+  if (num("max_run_seconds") !== undefined) limits.max_run_seconds = num("max_run_seconds");
   if (Object.keys(limits).length) o.limits = limits;
   return o as Partial<Config>;
 }
@@ -246,10 +256,10 @@ async function reviewPr(
     }
   }
 
-  // The LLM phase gets a wall-clock budget so partial results are posted before the job's own timeout kills the run.
+  // The run gets a wall-clock budget (indexing included) so partial results are posted before the job's own timeout kills it.
   const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
   const llm = createLLM(cfg, keys, { deadline });
-  const embedder = createEmbedder(cfg, keys);
+  const embedder = createEmbedder(cfg, keys, { deadline });
   const res = await runReview({
     root,
     cfg,
@@ -262,6 +272,7 @@ async function reviewPr(
     incrementalFrom,
     previousFileSummaries: incrementalFrom ? state.files : undefined,
     deadline,
+    priorityPaths: state.pending,
   });
   const { out } = res;
 
@@ -275,7 +286,6 @@ async function reviewPr(
       !posted.some((p) => p.path === f.path && Math.abs(p.line - (f.endLine ?? f.line)) <= 3 && similar(p.title, f.title)),
   );
   if (fresh.length < out.inline.length) log.info(`Skipping ${out.inline.length - fresh.length} finding(s) already posted earlier`);
-  out.funnel.posted = fresh.length;
 
   const threshold = cfg.review.request_changes_on;
   const blocking = threshold !== "none" && fresh.some((f) => severityRank(f.severity) >= severityRank(threshold as Severity));
@@ -286,6 +296,7 @@ async function reviewPr(
     blocking ? "REQUEST_CHANGES" : "COMMENT",
     fresh.length ? `Found ${fresh.length} issue(s) — see the summary comment for an overview.` : "",
   );
+  out.funnel.posted = fresh.length - failedToPlace.length;
   // Anything GitHub refused to anchor goes into the summary instead.
   out.outside.push(...failedToPlace);
   out.inline = out.inline.filter((f) => !failedToPlace.includes(f));

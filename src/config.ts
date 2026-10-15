@@ -77,9 +77,10 @@ export interface Config {
     max_total_input_tokens: number;
     concurrency: number;
     /**
-     * Wall-clock budget for the LLM phase. Files not reviewed by then are reported
-     * as skipped and picked up by the next run; 0 disables. Keep it below the
-     * workflow's timeout-minutes so partial results still get posted.
+     * Wall-clock budget for the run, counted from the start of indexing. Files not
+     * reviewed by then are reported as skipped and scheduled first on the next run;
+     * 0 disables. Keep it below the workflow's timeout-minutes so partial results
+     * still get posted.
      */
     max_run_seconds: number;
   };
@@ -212,6 +213,16 @@ export function loadConfig(
   // Normalise rules: allow plain strings.
   cfg.rules = (cfg.rules ?? []).map((r: Rule | string) => (typeof r === "string" ? { rule: r } : r));
   if (!SEVERITY_ORDER.includes(cfg.review.min_severity)) cfg.review.min_severity = "low";
+  // Numeric limits: anything that is not a finite non-negative number falls back to the default
+  // rather than silently disabling a guard (NaN from a bad action input would do that).
+  const limits = cfg.limits as unknown as Record<string, unknown>;
+  for (const [k, def] of Object.entries(DEFAULT_CONFIG.limits)) {
+    const v = limits[k];
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0) {
+      if (v !== undefined) log.warn(`limits.${k} must be a non-negative number; using ${def}`);
+      limits[k] = def;
+    }
+  }
   if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
 }
