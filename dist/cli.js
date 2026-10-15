@@ -11037,6 +11037,7 @@ function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
       const parsed = (0, import_yaml.parse)(text);
       fileCfg = isObj(parsed) ? parsed : {};
       log.info(`Loaded config from ${name}`);
+      warnUnknownKeys(fileCfg, DEFAULT_CONFIG);
     } catch (e) {
       log.warn(`Could not parse ${name}: ${e.message}. Using defaults.`);
     }
@@ -11060,6 +11061,21 @@ function loadConfig(repoRoot, explicitPath, overrides = {}, opts = {}) {
   }
   if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
+}
+function runDeadline(cfg, now = Date.now()) {
+  return cfg.limits.max_run_seconds > 0 ? now + cfg.limits.max_run_seconds * 1e3 : void 0;
+}
+var OPTIONAL_KEYS = /* @__PURE__ */ new Set(["model", "verify_model", "base_url", "embedding_model", "instructions"]);
+function warnUnknownKeys(given, known, prefix = "") {
+  for (const [k, v] of Object.entries(given)) {
+    const path2 = prefix ? `${prefix}.${k}` : k;
+    if (!(k in known)) {
+      if (!prefix && OPTIONAL_KEYS.has(k)) continue;
+      log.warn(`Unknown config key "${path2}" is ignored`);
+      continue;
+    }
+    if (isObj(v) && isObj(known[k])) warnUnknownKeys(v, known[k], path2);
+  }
 }
 function matchesAny(path2, globs) {
   return globs.some((g) => minimatch(path2, g, { dot: true, matchBase: !g.includes("/") }));
@@ -11313,11 +11329,12 @@ function sha1(s) {
 function shortHash(s, n = 12) {
   return sha1(s).slice(0, n);
 }
+var CHARS_PER_TOKEN = 4;
 function estimateTokens(s) {
-  return Math.ceil(s.length / 4);
+  return Math.ceil(s.length / CHARS_PER_TOKEN);
 }
 function truncateTokens(s, maxTokens) {
-  const maxChars = maxTokens * 4;
+  const maxChars = maxTokens * CHARS_PER_TOKEN;
   if (s.length <= maxChars) return s;
   const head = Math.floor(maxChars * 0.7);
   const tail = maxChars - head;
@@ -12607,7 +12624,6 @@ import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as rea
 import { join as join4 } from "node:path";
 var MAX_CHUNK_LINES = 120;
 var WINDOW = 60;
-var CONTAINERS = /* @__PURE__ */ new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "protocol"]);
 function buildChunks(graph) {
   const chunks = [];
   for (const f of Object.values(graph.data.files)) {
@@ -12624,7 +12640,7 @@ ${code}`;
     if (f.symbols.length) {
       for (const s of f.symbols) {
         const len = s.end - s.start + 1;
-        if (CONTAINERS.has(s.kind) && len > MAX_CHUNK_LINES) {
+        if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
           add(s.start, s.start + 25, s.name, s.kind);
         } else {
           add(s.start, Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), s.name, s.kind);
@@ -12772,9 +12788,9 @@ var Searcher = class {
       this.vector(query, k * 3, filter2)
     ]);
     const fused = /* @__PURE__ */ new Map();
-    const add = (list, weight) => list.forEach((h, rank2) => {
+    const add = (list, weight) => list.forEach((h, rank) => {
       const cur = fused.get(h.chunk.id) ?? { chunk: h.chunk, score: 0 };
-      cur.score += weight / (60 + rank2);
+      cur.score += weight / (60 + rank);
       fused.set(h.chunk.id, cur);
     });
     add(lex, 1);
@@ -13129,7 +13145,7 @@ var MockChat = class {
       const sections = (req.user.match(/^### /gm) ?? []).length;
       text = `Mock answer using ${sections} context section(s).`;
     }
-    return { text, inputTokens: Math.ceil((req.system.length + req.user.length) / 4), outputTokens: Math.ceil(text.length / 4) };
+    return { text, inputTokens: estimateTokens(req.system) + estimateTokens(req.user), outputTokens: estimateTokens(text) };
   }
   review(prompt) {
     const files = [];
@@ -13230,7 +13246,7 @@ var TrackedLLM = class {
     return this.inner.model;
   }
   async chat(req) {
-    const approx = Math.ceil((req.system.length + req.user.length) / 4);
+    const approx = estimateTokens(req.system) + estimateTokens(req.user);
     const deadline = req.deadline ?? this.deadline;
     if (deadline && Date.now() >= deadline) {
       throw new DeadlineExceededError("Run deadline reached (limits.max_run_seconds); skipping remaining LLM calls");
@@ -13448,7 +13464,7 @@ function renderSummary(out2, meta, state, opts = {}) {
     L.push("## Code review", "");
   }
   const issues = { ...state.issues ?? {} };
-  const current = [...out2.inline, ...out2.outside].sort((a, b) => rank(b.severity) - rank(a.severity));
+  const current = [...out2.inline, ...out2.outside].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
   const newCount = current.filter((f) => !issues[f.fingerprint]).length;
   for (const f of current) issues[f.fingerprint] = f.severity;
   L.push("## Findings", "");
@@ -13507,9 +13523,6 @@ function renderSummary(out2, meta, state, opts = {}) {
   const pending = complete ? [] : [...out2.failed, ...out2.skipped.filter((s2) => /deadline|budget/.test(s2.reason)).map((s2) => s2.path)];
   L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
   return L.join("\n");
-}
-function rank(s) {
-  return ["info", "low", "medium", "high", "critical"].indexOf(s);
 }
 function truncate(s, n) {
   return s.length > n ? `${s.slice(0, n - 1)}\u2026` : s;
@@ -13687,7 +13700,35 @@ var COMMON_NAMES = /* @__PURE__ */ new Set([
   "None"
 ]);
 var DEF_RE = /\b(?:function|def|func|class|fn|interface|type|struct|enum|trait)\s+([A-Za-z_$][\w$]*)/;
-function rawSnippet(graph, path2, start2, end, maxLines = 60) {
+var CONTAINER_LIKE = /* @__PURE__ */ new Set(["class", "module", "namespace", "impl"]);
+var NO_CALLER_KINDS = /* @__PURE__ */ new Set([...CONTAINER_LIKE, "interface"]);
+var RETRIEVAL = {
+  /** Lines shown by default for any snippet. */
+  defaultSnippetLines: 60,
+  /** Symbols longer than this are treated as containers when picking the innermost changed symbol. */
+  innermostMaxLines: 250,
+  /** Changed symbols up to this long are shown in full after the change. */
+  maxSymbolLines: 200,
+  /** Definitions of called functions: how many, and lines each. */
+  maxCallees: 10,
+  calleeSnippetLines: 40,
+  /** Callers of changed symbols: symbols covered, callers per symbol, lines of context around the call site. */
+  maxCallerSymbols: 5,
+  callersPerSymbol: 6,
+  callerContextLines: 3,
+  callerSnippetLines: 8,
+  /** References listed for a removed definition. */
+  maxRemovedRefs: 5,
+  /** Importers / imports listed in the dependencies section. */
+  maxListedPaths: 10,
+  /** Similar-code search: minimum added chars to bother, query size, candidates, shown, lines each. */
+  minAddedCharsForSearch: 40,
+  similarQueryChars: 2e3,
+  similarCandidates: 6,
+  similarShown: 3,
+  similarSnippetLines: 30
+};
+function rawSnippet(graph, path2, start2, end, maxLines = RETRIEVAL.defaultSnippetLines) {
   const content = graph.read(path2);
   if (content == null) return null;
   const e = Math.min(end, start2 + maxLines - 1);
@@ -13714,7 +13755,7 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
   const path2 = fd.path;
   const seen = [];
   const overlapsSeen = (p, s, e) => seen.some((x) => x.path === p && x.start <= e && x.end >= s);
-  const snippet = (p, s, e, maxLines = 60) => {
+  const snippet = (p, s, e, maxLines = RETRIEVAL.defaultSnippetLines) => {
     const sn = rawSnippet(graph, p, s, e, maxLines);
     if (sn) seen.push({ path: p, start: s, end: e });
     return sn;
@@ -13728,17 +13769,17 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
   if (entry && fd.status !== "deleted") {
     for (const [s, e] of ranges) {
       const syms = graph.symbolsOverlapping(path2, s, e);
-      const inner = [...syms].reverse().find((x) => x.end - x.start < 250) ?? syms[syms.length - 1];
+      const inner = [...syms].reverse().find((x) => x.end - x.start < RETRIEVAL.innermostMaxLines) ?? syms[syms.length - 1];
       if (inner) changedSyms.set(`${inner.name}@${inner.start}`, inner);
-      for (const x of syms) if (!["class", "module", "namespace", "impl"].includes(x.kind)) changedSyms.set(`${x.name}@${x.start}`, x);
+      for (const x of syms) if (!CONTAINER_LIKE.has(x.kind)) changedSyms.set(`${x.name}@${x.start}`, x);
     }
     const shown = /* @__PURE__ */ new Set();
     for (const sym of changedSyms.values()) {
-      if (sym.end - sym.start > 200) continue;
+      if (sym.end - sym.start > RETRIEVAL.maxSymbolLines) continue;
       const key = `${sym.start}-${sym.end}`;
       if (shown.has(key)) continue;
       shown.add(key);
-      const sn = snippet(path2, sym.start, sym.end, 200);
+      const sn = snippet(path2, sym.start, sym.end, RETRIEVAL.maxSymbolLines);
       if (sn) sections.push({ title: `Full ${sym.kind} \`${sym.name}\` after the change`, body: sn, priority: 100 });
     }
   }
@@ -13748,7 +13789,7 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
     for (const c of entry.topLevelCalls) if (addedTokens.has(c)) calls.add(c);
     let n = 0;
     for (const name of calls) {
-      if (n >= 10) break;
+      if (n >= RETRIEVAL.maxCallees) break;
       const all = graph.definitionsOf(name, path2).filter(
         (d2) => !(d2.path === path2 && [...changedSyms.values()].some((s) => s.start === d2.symbol.start))
       );
@@ -13756,7 +13797,7 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
       if (!defs.length && all.length === 1 && !COMMON_NAMES.has(name)) defs.push(all[0]);
       const d = defs[0];
       if (!d) continue;
-      const sn = snippet(d.path, d.symbol.start, d.symbol.end, 40);
+      const sn = snippet(d.path, d.symbol.start, d.symbol.end, RETRIEVAL.calleeSnippetLines);
       if (sn) {
         sections.push({
           title: `Definition of \`${name}\` (called by the changed code)${defs.length > 1 ? ` \u2014 ${defs.length} definitions found, showing best match` : ""}`,
@@ -13770,17 +13811,22 @@ async function buildFileContext(fd, graph, searcher, budget, prPaths) {
   {
     let n = 0;
     for (const sym of changedSyms.values()) {
-      if (["class", "module", "namespace", "impl", "interface"].includes(sym.kind)) continue;
+      if (NO_CALLER_KINDS.has(sym.kind)) continue;
       if (COMMON_NAMES.has(sym.name)) continue;
       const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
       const relevant = graph.callersOf(sym.name).filter((c) => !(c.path === path2 && c.symbol.start === sym.start)).filter((c) => unique || c.path === path2 || graph.dependsOn(c.path, path2));
-      const callers = relevant.slice(0, 6);
+      const callers = relevant.slice(0, RETRIEVAL.callersPerSymbol);
       if (!callers.length) continue;
       const parts = [];
       for (const c of callers) {
         const line = callSiteLine(graph, c.path, c.symbol, sym.name);
         if (line == null) continue;
-        const sn = snippet(c.path, Math.max(c.symbol.start, line - 3), Math.min(c.symbol.end, line + 3), 8);
+        const sn = snippet(
+          c.path,
+          Math.max(c.symbol.start, line - RETRIEVAL.callerContextLines),
+          Math.min(c.symbol.end, line + RETRIEVAL.callerContextLines),
+          RETRIEVAL.callerSnippetLines
+        );
         if (sn) parts.push(`in \`${c.symbol.name}\`${prPaths.has(c.path) ? " (also changed in this PR)" : ""}:
 ${sn}`);
       }
@@ -13793,7 +13839,7 @@ ${sn}`);
         });
         n++;
       }
-      if (n >= 5) break;
+      if (n >= RETRIEVAL.maxCallerSymbols) break;
     }
   }
   {
@@ -13803,7 +13849,7 @@ ${sn}`);
       if (m && !graph.defsByName.has(m[1])) removed.add(m[1]);
     }
     for (const name of removed) {
-      const refs = graph.callersOf(name).slice(0, 5);
+      const refs = graph.callersOf(name).slice(0, RETRIEVAL.maxRemovedRefs);
       if (!refs.length) continue;
       const list = refs.map((r) => {
         const line = callSiteLine(graph, r.path, r.symbol, name);
@@ -13822,11 +13868,11 @@ ${sn}`);
     const lines = [];
     if (importers.length) {
       lines.push(
-        `Imported by ${importers.length} file(s): ${importers.slice(0, 10).map((p) => `\`${p}\``).join(", ")}${importers.length > 10 ? ", \u2026" : ""}`
+        `Imported by ${importers.length} file(s): ${importers.slice(0, RETRIEVAL.maxListedPaths).map((p) => `\`${p}\``).join(", ")}${importers.length > RETRIEVAL.maxListedPaths ? ", \u2026" : ""}`
       );
     }
     if (entry?.resolved.length) {
-      lines.push(`Imports: ${entry.resolved.slice(0, 10).map((p) => `\`${p}\``).join(", ")}`);
+      lines.push(`Imports: ${entry.resolved.slice(0, RETRIEVAL.maxListedPaths).map((p) => `\`${p}\``).join(", ")}`);
     }
     if (tests.length) {
       const changed = tests.filter((t) => prPaths.has(t));
@@ -13836,16 +13882,16 @@ ${sn}`);
     }
     if (lines.length) sections.push({ title: "Dependencies", body: lines.join("\n"), priority: 60 });
   }
-  if (addedText.trim().length > 40) {
-    const query = [...changedSyms.values()].map((s) => s.name).join(" ") + "\n" + addedText.slice(0, 2e3);
+  if (addedText.trim().length > RETRIEVAL.minAddedCharsForSearch) {
+    const query = [...changedSyms.values()].map((s) => s.name).join(" ") + "\n" + addedText.slice(0, RETRIEVAL.similarQueryChars);
     const hits = await searcher.search(
       query,
-      6,
+      RETRIEVAL.similarCandidates,
       (c) => c.path !== path2 && !!c.name && !overlapsSeen(c.path, c.start, c.end)
     );
     const parts = [];
-    for (const h of hits.slice(0, 3)) {
-      const sn = snippet(h.chunk.path, h.chunk.start, h.chunk.end, 30);
+    for (const h of hits.slice(0, RETRIEVAL.similarShown)) {
+      const sn = snippet(h.chunk.path, h.chunk.start, h.chunk.end, RETRIEVAL.similarSnippetLines);
       if (sn) parts.push(sn);
     }
     if (parts.length) {
@@ -13871,6 +13917,35 @@ ${s.body}`;
 }
 
 // src/review/reviewer.ts
+var REVIEW = {
+  /** Token allowance for the system prompt, on top of the PR header. */
+  systemPromptTokens: 2500,
+  /** Share of a call's input budget that diffs may take; the rest is context. */
+  diffShareOfCall: 0.45,
+  /** Share of the space left after header and diffs that context may fill. */
+  contextShareOfCall: 0.9,
+  /** Context budget floor per file, however many files share the call. */
+  minContextTokens: 1500,
+  maxFilesPerCall: 5,
+  /** A finding's line may be snapped this far to the nearest commentable line. */
+  anchorSnapLines: 3,
+  /** Longest multi-line range a suggestion may replace. */
+  maxSuggestionLines: 40,
+  /** Findings on the same path within this many lines with similar titles are one finding. */
+  dedupeLineSlack: 2,
+  maxTitleChars: 120,
+  /** Confidence assumed when the model omits it. */
+  defaultConfidence: 0.7,
+  verifyMaxTokens: 2e3,
+  /** Summary call: output tokens, input cap, and how much of the PR it is shown. */
+  summaryMaxTokens: 3e3,
+  summaryInputTokens: 3e4,
+  summaryMaxFiles: 150,
+  summaryMaxCommits: 40,
+  summaryBodyChars: 3e3,
+  /** Grace past the run deadline for the one small summary call. */
+  summaryGraceMs: 9e4
+};
 function fingerprint(path2, title) {
   return shortHash(`${path2}|${title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
 }
@@ -13914,7 +13989,7 @@ function affinity(candidates, graph) {
   for (const f of candidates) (groups.get(find(f.path)) ?? groups.set(find(f.path), []).get(find(f.path))).push(f);
   return { groups: [...groups.values()], degree };
 }
-function planBatches(candidates, graph, maxDiffPerBatch, maxFiles = 5, priority = /* @__PURE__ */ new Set()) {
+function planBatches(candidates, graph, maxDiffPerBatch, priority = /* @__PURE__ */ new Set(), maxFiles = REVIEW.maxFilesPerCall) {
   const size = (f) => f.additions + f.deletions;
   const render = (f) => {
     let d = renderDiffForModel(f);
@@ -13994,10 +14069,10 @@ async function reviewPullRequest(input) {
   }
   const perCall = cfg.limits.max_input_tokens_per_call;
   const header = renderPrHeader(pr);
-  const headerTokens = estimateTokens(header) + 2500;
-  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
+  const headerTokens = estimateTokens(header) + REVIEW.systemPromptTokens;
+  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * REVIEW.diffShareOfCall);
   const priority = new Set(input.priorityPaths ?? []);
-  const batches = planBatches(candidates, graph, maxDiffPerBatch, 5, priority);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch, priority);
   const carried = candidates.filter((f) => priority.has(f.path)).length;
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
   const fileSummaries = { ...input.previousFileSummaries ?? {} };
@@ -14011,8 +14086,8 @@ async function reviewPullRequest(input) {
       return;
     }
     const ctxBudget = Math.max(
-      1500,
-      Math.floor((perCall - headerTokens - batch.diffTokens) * 0.9 / batch.files.length)
+      REVIEW.minContextTokens,
+      Math.floor((perCall - headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall / batch.files.length)
     );
     const parts = [header];
     const rules = /* @__PURE__ */ new Map();
@@ -14106,7 +14181,7 @@ Review the ${batch.files.length === 1 ? "file" : `${batch.files.length} files`} 
   if (cfg.summary.enabled) {
     const ts = Date.now();
     try {
-      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + 9e4 : void 0;
+      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + REVIEW.summaryGraceMs : void 0;
       summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
@@ -14164,7 +14239,7 @@ function normalizeFinding(rf, files) {
     }
   }
   const severity = SEVERITY_ORDER.includes(String(rf.severity)) ? rf.severity : "medium";
-  const title = String(rf.title).replace(/\s+/g, " ").trim().slice(0, 120);
+  const title = String(rf.title).replace(/\s+/g, " ").trim().slice(0, REVIEW.maxTitleChars);
   return {
     path: path2,
     line: Math.round(rf.line),
@@ -14174,7 +14249,7 @@ function normalizeFinding(rf, files) {
     title,
     body: String(rf.body ?? "").trim(),
     suggestion: typeof rf.suggestion === "string" && rf.suggestion.trim() ? rf.suggestion.replace(/\n+$/, "") : void 0,
-    confidence: typeof rf.confidence === "number" ? Math.max(0, Math.min(1, rf.confidence)) : 0.7,
+    confidence: typeof rf.confidence === "number" ? Math.max(0, Math.min(1, rf.confidence)) : REVIEW.defaultConfidence,
     fingerprint: fingerprint(path2, title)
   };
 }
@@ -14184,7 +14259,7 @@ function anchor(f, fd, cfg) {
   if (!lines.has(line)) {
     let best = null;
     for (const n of lines.keys()) {
-      if (Math.abs(n - line) <= 3 && (best === null || Math.abs(n - line) < Math.abs(best - line))) best = n;
+      if (Math.abs(n - line) <= REVIEW.anchorSnapLines && (best === null || Math.abs(n - line) < Math.abs(best - line))) best = n;
     }
     if (best === null) return null;
     line = best;
@@ -14193,7 +14268,7 @@ function anchor(f, fd, cfg) {
   let endLine = f.endLine;
   let suggestion = cfg.review.suggestions ? f.suggestion : void 0;
   if (endLine !== void 0) {
-    let ok = endLine > line && endLine - line <= 40;
+    let ok = endLine > line && endLine - line <= REVIEW.maxSuggestionLines;
     for (let n = line; ok && n <= endLine; n++) if (lines.get(n) !== hunk) ok = false;
     if (!ok) {
       endLine = void 0;
@@ -14207,7 +14282,7 @@ function dedupe(list) {
   const out2 = [];
   for (const f of list) {
     const dup = out2.findIndex(
-      (o) => o.path === f.path && (o.fingerprint === f.fingerprint || Math.abs(o.line - f.line) <= 2 && similar(o.title, f.title))
+      (o) => o.path === f.path && (o.fingerprint === f.fingerprint || Math.abs(o.line - f.line) <= REVIEW.dedupeLineSlack && similar(o.title, f.title))
     );
     if (dup < 0) out2.push(f);
     else if (severityRank(f.severity) > severityRank(out2[dup].severity)) out2[dup] = f;
@@ -14244,7 +14319,7 @@ async function verifyFindings(llm, cfg, raw, prompts) {
 ## Findings to verify
 ${list}`,
         json: true,
-        maxTokens: 2e3,
+        maxTokens: REVIEW.verifyMaxTokens,
         label: `verify:${bi}`,
         model: cfg.verify_model
       });
@@ -14269,15 +14344,15 @@ ${list}`,
   return { kept, unverified };
 }
 async function summarize(llm, cfg, pr, files, fileSummaries, findings, commits, deadline) {
-  const fileLines = files.slice(0, 150).map((f) => `- ${f.path} (${f.status}, +${f.additions}/-${f.deletions})${fileSummaries[f.path] ? `: ${fileSummaries[f.path]}` : ""}`).join("\n");
+  const fileLines = files.slice(0, REVIEW.summaryMaxFiles).map((f) => `- ${f.path} (${f.status}, +${f.additions}/-${f.deletions})${fileSummaries[f.path] ? `: ${fileSummaries[f.path]}` : ""}`).join("\n");
   const findingLines = findings.length ? findings.map((f) => `- [${f.severity}] ${f.path}:${f.line} ${f.title}`).join("\n") : "(no issues found)";
   const user = `# ${pr.title}
 ${pr.body ? `
 ## Description
-${pr.body.slice(0, 3e3)}
+${pr.body.slice(0, REVIEW.summaryBodyChars)}
 ` : ""}
 ## Commits
-${commits.slice(0, 40).map((c) => `- ${c.subject}`).join("\n") || "(n/a)"}
+${commits.slice(0, REVIEW.summaryMaxCommits).map((c) => `- ${c.subject}`).join("\n") || "(n/a)"}
 
 ## Files
 ${fileLines}
@@ -14286,9 +14361,9 @@ ${fileLines}
 ${findingLines}`;
   const res = await llm.chat({
     system: SUMMARY_SYSTEM(cfg),
-    user: truncateTokens(user, 3e4),
+    user: truncateTokens(user, REVIEW.summaryInputTokens),
     json: true,
-    maxTokens: 3e3,
+    maxTokens: REVIEW.summaryMaxTokens,
     label: "summary",
     deadline
   });
@@ -14471,7 +14546,7 @@ async function main() {
     if (git.run(["status", "--porcelain", "--untracked-files=no"], { allowFail: true }).trim()) {
       log.warn("You have uncommitted changes; they are indexed for context but not reviewed. Commit them to review them.");
     }
-    const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1e3 : void 0;
+    const deadline = runDeadline(cfg);
     const llm = createLLM(cfg, keys, { deadline });
     const embedder = createEmbedder(cfg, keys, { deadline });
     const title = str(flags2.title) ?? git.run(["log", "-1", "--format=%s", headSha]).trim();

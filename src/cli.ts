@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig, type Config } from "./config.js";
+import { loadConfig, runDeadline, type Config } from "./config.js";
 import { answerQuestion } from "./chat/chat.js";
 import { Git } from "./git/git.js";
 import { openWorkspace } from "./graph/workspace.js";
@@ -115,7 +115,7 @@ async function main() {
     if (git.run(["status", "--porcelain", "--untracked-files=no"], { allowFail: true }).trim()) {
       log.warn("You have uncommitted changes; they are indexed for context but not reviewed. Commit them to review them.");
     }
-    const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
+    const deadline = runDeadline(cfg);
     const llm = createLLM(cfg, keys, { deadline });
     const embedder = createEmbedder(cfg, keys, { deadline });
     const title = str(flags.title) ?? git.run(["log", "-1", "--format=%s", headSha]).trim();

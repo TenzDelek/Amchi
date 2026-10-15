@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 const require = createRequire(import.meta.url);
 const GRAMMARS = [
   "typescript", "tsx", "javascript", "python", "go", "rust", "java", "kotlin",
-  "c", "cpp", "c_sharp", "php", "swift", "scala", "vue", "lua", "elixir",
+  "c", "cpp", "c_sharp", "php", "swift", "scala", "lua", "elixir",
 ];
 
 rmSync("dist", { recursive: true, force: true });

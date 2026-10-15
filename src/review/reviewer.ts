@@ -117,6 +117,37 @@ interface RawReview {
   findings?: RawFinding[];
 }
 
+/** Review-stage limits. Hand-tuned; kept together so the batching and filtering read as policy. */
+export const REVIEW = {
+  /** Token allowance for the system prompt, on top of the PR header. */
+  systemPromptTokens: 2500,
+  /** Share of a call's input budget that diffs may take; the rest is context. */
+  diffShareOfCall: 0.45,
+  /** Share of the space left after header and diffs that context may fill. */
+  contextShareOfCall: 0.9,
+  /** Context budget floor per file, however many files share the call. */
+  minContextTokens: 1500,
+  maxFilesPerCall: 5,
+  /** A finding's line may be snapped this far to the nearest commentable line. */
+  anchorSnapLines: 3,
+  /** Longest multi-line range a suggestion may replace. */
+  maxSuggestionLines: 40,
+  /** Findings on the same path within this many lines with similar titles are one finding. */
+  dedupeLineSlack: 2,
+  maxTitleChars: 120,
+  /** Confidence assumed when the model omits it. */
+  defaultConfidence: 0.7,
+  verifyMaxTokens: 2000,
+  /** Summary call: output tokens, input cap, and how much of the PR it is shown. */
+  summaryMaxTokens: 3000,
+  summaryInputTokens: 30_000,
+  summaryMaxFiles: 150,
+  summaryMaxCommits: 40,
+  summaryBodyChars: 3000,
+  /** Grace past the run deadline for the one small summary call. */
+  summaryGraceMs: 90_000,
+} as const;
+
 export function fingerprint(path: string, title: string): string {
   return shortHash(`${path}|${title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`);
 }
@@ -187,8 +218,8 @@ export function planBatches(
   candidates: FileDiff[],
   graph: CodeGraph,
   maxDiffPerBatch: number,
-  maxFiles = 5,
   priority: Set<string> = new Set(),
+  maxFiles: number = REVIEW.maxFilesPerCall,
 ): Batch[] {
   const size = (f: FileDiff) => f.additions + f.deletions;
   const render = (f: FileDiff) => {
@@ -283,10 +314,10 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
   // ---- 2. batch files by diff size ----------------------------------------
   const perCall = cfg.limits.max_input_tokens_per_call;
   const header = renderPrHeader(pr);
-  const headerTokens = estimateTokens(header) + 2500; // + system prompt
-  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * 0.45);
+  const headerTokens = estimateTokens(header) + REVIEW.systemPromptTokens;
+  const maxDiffPerBatch = Math.floor((perCall - headerTokens) * REVIEW.diffShareOfCall);
   const priority = new Set(input.priorityPaths ?? []);
-  const batches = planBatches(candidates, graph, maxDiffPerBatch, 5, priority);
+  const batches = planBatches(candidates, graph, maxDiffPerBatch, priority);
   const carried = candidates.filter((f) => priority.has(f.path)).length;
   log.info(`Reviewing ${candidates.length} file(s) in ${batches.length} LLM call(s)${carried ? ` (${carried} left over from the previous run go first)` : ""}`);
 
@@ -303,8 +334,8 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
       return;
     }
     const ctxBudget = Math.max(
-      1500,
-      Math.floor((perCall - headerTokens - batch.diffTokens) * 0.9 / batch.files.length),
+      REVIEW.minContextTokens,
+      Math.floor(((perCall - headerTokens - batch.diffTokens) * REVIEW.contextShareOfCall) / batch.files.length),
     );
     const parts: string[] = [header];
     const rules = new Map<string, Rule>();
@@ -400,7 +431,7 @@ export async function reviewPullRequest(input: ReviewInput): Promise<ReviewOutpu
     const ts = Date.now();
     try {
       // The summary is one small call; give it a short grace period past the deadline so a partial run still gets a score.
-      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + 90_000 : undefined;
+      const deadline = input.deadline ? Math.max(input.deadline, Date.now()) + REVIEW.summaryGraceMs : undefined;
       summary = await summarize(llm, cfg, pr, input.allFiles ?? input.files, fileSummaries, inline.concat(outsideKept), input.commits ?? [], deadline);
     } catch (e) {
       if (e instanceof BudgetExceededError) budgetHit = true;
@@ -463,7 +494,7 @@ function normalizeFinding(rf: RawFinding, files: FileDiff[]): Finding | null {
     }
   }
   const severity = (SEVERITY_ORDER as string[]).includes(String(rf.severity)) ? (rf.severity as Severity) : "medium";
-  const title = String(rf.title).replace(/\s+/g, " ").trim().slice(0, 120);
+  const title = String(rf.title).replace(/\s+/g, " ").trim().slice(0, REVIEW.maxTitleChars);
   return {
     path,
     line: Math.round(rf.line),
@@ -473,7 +504,7 @@ function normalizeFinding(rf: RawFinding, files: FileDiff[]): Finding | null {
     title,
     body: String(rf.body ?? "").trim(),
     suggestion: typeof rf.suggestion === "string" && rf.suggestion.trim() ? rf.suggestion.replace(/\n+$/, "") : undefined,
-    confidence: typeof rf.confidence === "number" ? Math.max(0, Math.min(1, rf.confidence)) : 0.7,
+    confidence: typeof rf.confidence === "number" ? Math.max(0, Math.min(1, rf.confidence)) : REVIEW.defaultConfidence,
     fingerprint: fingerprint(path, title),
   };
 }
@@ -485,7 +516,7 @@ function anchor(f: Finding, fd: FileDiff, cfg: Config): Finding | null {
   if (!lines.has(line)) {
     let best: number | null = null;
     for (const n of lines.keys()) {
-      if (Math.abs(n - line) <= 3 && (best === null || Math.abs(n - line) < Math.abs(best - line))) best = n;
+      if (Math.abs(n - line) <= REVIEW.anchorSnapLines && (best === null || Math.abs(n - line) < Math.abs(best - line))) best = n;
     }
     if (best === null) return null;
     line = best;
@@ -494,7 +525,7 @@ function anchor(f: Finding, fd: FileDiff, cfg: Config): Finding | null {
   let endLine = f.endLine;
   let suggestion = cfg.review.suggestions ? f.suggestion : undefined;
   if (endLine !== undefined) {
-    let ok = endLine > line && endLine - line <= 40;
+    let ok = endLine > line && endLine - line <= REVIEW.maxSuggestionLines;
     for (let n = line; ok && n <= endLine; n++) if (lines.get(n) !== hunk) ok = false;
     if (!ok) {
       endLine = undefined;
@@ -512,7 +543,7 @@ function dedupe(list: Finding[]): Finding[] {
       (o) =>
         o.path === f.path &&
         (o.fingerprint === f.fingerprint ||
-          (Math.abs(o.line - f.line) <= 2 && similar(o.title, f.title))),
+          (Math.abs(o.line - f.line) <= REVIEW.dedupeLineSlack && similar(o.title, f.title))),
     );
     if (dup < 0) out.push(f);
     else if (severityRank(f.severity) > severityRank(out[dup].severity)) out[dup] = f;
@@ -554,7 +585,7 @@ async function verifyFindings(
         system: VERIFY_SYSTEM,
         user: `${prompts[bi]}\n\n## Findings to verify\n${list}`,
         json: true,
-        maxTokens: 2000,
+        maxTokens: REVIEW.verifyMaxTokens,
         label: `verify:${bi}`,
         model: cfg.verify_model,
       });
@@ -590,16 +621,16 @@ async function summarize(
   deadline?: number,
 ): Promise<SummaryJson> {
   const fileLines = files
-    .slice(0, 150)
+    .slice(0, REVIEW.summaryMaxFiles)
     .map((f) => `- ${f.path} (${f.status}, +${f.additions}/-${f.deletions})${fileSummaries[f.path] ? `: ${fileSummaries[f.path]}` : ""}`)
     .join("\n");
   const findingLines = findings.length
     ? findings.map((f) => `- [${f.severity}] ${f.path}:${f.line} ${f.title}`).join("\n")
     : "(no issues found)";
   const user = `# ${pr.title}
-${pr.body ? `\n## Description\n${pr.body.slice(0, 3000)}\n` : ""}
+${pr.body ? `\n## Description\n${pr.body.slice(0, REVIEW.summaryBodyChars)}\n` : ""}
 ## Commits
-${commits.slice(0, 40).map((c) => `- ${c.subject}`).join("\n") || "(n/a)"}
+${commits.slice(0, REVIEW.summaryMaxCommits).map((c) => `- ${c.subject}`).join("\n") || "(n/a)"}
 
 ## Files
 ${fileLines}
@@ -608,9 +639,9 @@ ${fileLines}
 ${findingLines}`;
   const res = await llm.chat({
     system: SUMMARY_SYSTEM(cfg),
-    user: truncateTokens(user, 30_000),
+    user: truncateTokens(user, REVIEW.summaryInputTokens),
     json: true,
-    maxTokens: 3000,
+    maxTokens: REVIEW.summaryMaxTokens,
     label: "summary",
     deadline,
   });

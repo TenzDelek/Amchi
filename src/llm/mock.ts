@@ -4,7 +4,7 @@
  * pipeline (prompting, JSON parsing, anchoring, posting) without an API key.
  */
 import type { ChatRequest, ChatResult, Embedder, LLM } from "./types.js";
-import { tokenize } from "../util/text.js";
+import { estimateTokens, tokenize } from "../util/text.js";
 
 const PATTERNS: { re: RegExp; severity: string; category: string; title: string; body: string; fix?: (s: string) => string }[] = [
   {
@@ -62,7 +62,7 @@ export class MockChat implements LLM {
       const sections = (req.user.match(/^### /gm) ?? []).length;
       text = `Mock answer using ${sections} context section(s).`;
     }
-    return { text, inputTokens: Math.ceil((req.system.length + req.user.length) / 4), outputTokens: Math.ceil(text.length / 4) };
+    return { text, inputTokens: estimateTokens(req.system) + estimateTokens(req.user), outputTokens: estimateTokens(text) };
   }
 
   private review(prompt: string) {

@@ -199,6 +199,7 @@ export function loadConfig(
       const parsed = parseYaml(text);
       fileCfg = isObj(parsed) ? parsed : {};
       log.info(`Loaded config from ${name}`);
+      warnUnknownKeys(fileCfg, DEFAULT_CONFIG as unknown as Record<string, unknown>);
     } catch (e) {
       log.warn(`Could not parse ${name}: ${(e as Error).message}. Using defaults.`);
     }
@@ -225,6 +226,27 @@ export function loadConfig(
   }
   if (cfg.review.badges !== "text") cfg.review.badges = "image";
   return cfg;
+}
+
+/** Epoch ms at which the run must stop starting LLM calls, or undefined when `limits.max_run_seconds` is 0. */
+export function runDeadline(cfg: Config, now = Date.now()): number | undefined {
+  return cfg.limits.max_run_seconds > 0 ? now + cfg.limits.max_run_seconds * 1000 : undefined;
+}
+
+/** Top-level keys that are valid but absent from DEFAULT_CONFIG because they have no default. */
+const OPTIONAL_KEYS = new Set(["model", "verify_model", "base_url", "embedding_model", "instructions"]);
+
+/** Warn about keys the schema does not know, so a typo like `min_serverity` is not silently ignored. */
+function warnUnknownKeys(given: Record<string, unknown>, known: Record<string, unknown>, prefix = "") {
+  for (const [k, v] of Object.entries(given)) {
+    const path = prefix ? `${prefix}.${k}` : k;
+    if (!(k in known)) {
+      if (!prefix && OPTIONAL_KEYS.has(k)) continue;
+      log.warn(`Unknown config key "${path}" is ignored`);
+      continue;
+    }
+    if (isObj(v) && isObj(known[k])) warnUnknownKeys(v, known[k] as Record<string, unknown>, path);
+  }
 }
 
 export function matchesAny(path: string, globs: string[]): boolean {

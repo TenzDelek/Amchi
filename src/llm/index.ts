@@ -2,6 +2,7 @@ import type { Config, ProviderName } from "../config.js";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../util/log.js";
+import { estimateTokens } from "../util/text.js";
 import { AnthropicChat, GeminiChat, GeminiEmbedder, OpenAIChat, OpenAIEmbedder } from "./providers.js";
 import { MockChat, MockEmbedder } from "./mock.js";
 import { BudgetExceededError, DeadlineExceededError, type ChatRequest, type ChatResult, type Embedder, type LLM, type Usage } from "./types.js";
@@ -75,7 +76,7 @@ export class TrackedLLM implements LLM {
     return this.inner.model;
   }
   async chat(req: ChatRequest): Promise<ChatResult> {
-    const approx = Math.ceil((req.system.length + req.user.length) / 4);
+    const approx = estimateTokens(req.system) + estimateTokens(req.user);
     const deadline = req.deadline ?? this.deadline;
     if (deadline && Date.now() >= deadline) {
       throw new DeadlineExceededError("Run deadline reached (limits.max_run_seconds); skipping remaining LLM calls");

@@ -10,3 +10,5 @@ change is implemented, **Proposed** while it is still a plan, and
 | [002](002-run-deadline-with-partial-posting.md) | Wall-clock run deadline with partial posting | Accepted |
 | [003](003-embeddings-follow-the-review-provider.md) | Embeddings default to the review provider's own vendor | Accepted |
 | [004](004-incremental-search-index.md) | Incremental search index | Proposed |
+
+The prioritised debt inventory and remediation plan are in [`../tech-debt.md`](../tech-debt.md).

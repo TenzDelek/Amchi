@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { parseUnifiedDiff } from "../src/git/diff.js";
 import { buildIndex, CodeGraph } from "../src/graph/indexer.js";
@@ -47,7 +47,7 @@ describe("batch planning by graph affinity", () => {
       expect(groups).toContainEqual(["src/zz_unrelated.ts"]);
 
       // Three files per call: the related trio stays together even though the unrelated files have bigger diffs.
-      const batches = planBatches(files, graph, 100_000, 3).map((b) => b.files.map((f) => f.path).sort());
+      const batches = planBatches(files, graph, 100_000, new Set(), 3).map((b) => b.files.map((f) => f.path).sort());
       expect(batches).toContainEqual(["src/a.ts", "src/b.ts", "src/c.ts"]);
       expect(batches.flat().sort()).toEqual(files.map((f) => f.path).sort());
     } finally {
@@ -67,7 +67,7 @@ describe("batch planning by graph affinity", () => {
       const { graph } = await graphFor(repo);
       const files = diffs(repo, base, head);
       expect(relatedGroups(files, graph)).toHaveLength(1);
-      const batches = planBatches(files, graph, 100_000, 5);
+      const batches = planBatches(files, graph, 100_000, new Set(), 5);
       expect(batches.map((b) => b.files.length)).toEqual([5, 2]);
       // The hub (the file every other one depends on) leads the first batch.
       expect(batches[0].files[0].path).toBe("src/a.ts");
@@ -116,8 +116,8 @@ describe("batch planning: caller edges and priority", () => {
       const head = repo.commit("change");
       const { graph } = await graphFor(repo);
       const files = diffs(repo, base, head);
-      expect(planBatches(files, graph, 100_000, 1).map((b) => b.files[0].path)).toEqual(["src/big.ts", "src/small.ts"]);
-      expect(planBatches(files, graph, 100_000, 1, new Set(["src/small.ts"])).map((b) => b.files[0].path)).toEqual(["src/small.ts", "src/big.ts"]);
+      expect(planBatches(files, graph, 100_000, new Set(), 1).map((b) => b.files[0].path)).toEqual(["src/big.ts", "src/small.ts"]);
+      expect(planBatches(files, graph, 100_000, new Set(["src/small.ts"]), 1).map((b) => b.files[0].path)).toEqual(["src/small.ts", "src/big.ts"]);
     } finally {
       repo.cleanup();
     }
@@ -271,6 +271,25 @@ describe("importersOfMissingMany", () => {
       expect(graph.importersOfMissing("src/also.ts").sort()).toEqual(["src/x.ts", "src/y.ts"]);
     } finally {
       repo.cleanup();
+    }
+  });
+});
+
+describe("config schema warnings", () => {
+  it("warns about misspelled or unknown keys instead of ignoring them silently", async () => {
+    const { log } = await import("../src/util/log.js");
+    const warn = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+    try {
+      const yaml = "model: x\nreview:\n  min_serverity: high\n  max_comments: 3\nlimits:\n  max_run_seconds: 10\nbogus: 1\n";
+      const cfg = loadConfig("/nonexistent", undefined, {}, { readFile: (n) => (n === ".codereview.yml" ? yaml : null) });
+      const msgs = warn.mock.calls.map((c) => c[0]);
+      expect(msgs).toContain('Unknown config key "review.min_serverity" is ignored');
+      expect(msgs).toContain('Unknown config key "bogus" is ignored');
+      expect(msgs.some((m) => m.includes('"model"'))).toBe(false); // optional keys without a default are known
+      expect(cfg.review.max_comments).toBe(3);
+      expect(cfg.limits.max_run_seconds).toBe(10);
+    } finally {
+      warn.mockRestore();
     }
   });
 });

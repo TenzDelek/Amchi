@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseSource } from "../src/graph/parser.js";
+import { LANGS } from "../src/graph/languages.js";
 
 const CASES: [string, string, string[], string[]][] = [
   ["kotlin", "import com.acme.Store\nclass A { fun run() { Store().save(1) } }\nfun top() = A().run()", ["A", "run", "top"], ["save"]],
@@ -88,5 +89,16 @@ class MyApp extends StatelessWidget {
   it("records require() as an import", async () => {
     const p = (await parseSource("const x = require('./x');", "javascript"))!;
     expect(p.imports).toContain("./x");
+  });
+});
+
+describe("grammar bundle", () => {
+  it("build.mjs copies exactly the grammars languages.ts declares (dart comes from its own package)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../build.mjs", import.meta.url), "utf8");
+    const list = src.match(/const GRAMMARS = \[([\s\S]*?)\];/)![1];
+    const bundled = new Set([...list.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
+    const declared = new Set(Object.values(LANGS).map((l) => l.grammar).filter((g) => g !== "dart"));
+    expect([...bundled].sort()).toEqual([...declared].sort());
   });
 });

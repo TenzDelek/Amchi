@@ -1,4 +1,4 @@
-import type { Severity } from "../config.js";
+import { severityRank, type Severity } from "../config.js";
 import type { FileDiff } from "../git/diff.js";
 import type { Usage } from "../llm/types.js";
 import type { Finding, ReviewOutput } from "./reviewer.js";
@@ -199,7 +199,7 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
 
   // ---- findings (this run) + cumulative counts ---------------------------------
   const issues: Record<string, Severity> = { ...(state.issues ?? {}) };
-  const current = [...out.inline, ...out.outside].sort((a, b) => rank(b.severity) - rank(a.severity));
+  const current = [...out.inline, ...out.outside].sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
   const newCount = current.filter((f) => !issues[f.fingerprint]).length;
   for (const f of current) issues[f.fingerprint] = f.severity;
 
@@ -273,10 +273,6 @@ export function renderSummary(out: ReviewOutput, meta: SummaryMeta, state: Revie
     : [...out.failed, ...out.skipped.filter((s) => /deadline|budget/.test(s.reason)).map((s) => s.path)];
   L.push(`<!-- amchi:state ${encodeState({ lastSha, files: fileSummaries, issues, reviews, pending })} -->`);
   return L.join("\n");
-}
-
-function rank(s: Severity): number {
-  return ["info", "low", "medium", "high", "critical"].indexOf(s);
 }
 
 function truncate(s: string, n: number) {

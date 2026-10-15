@@ -4,6 +4,7 @@ import type { Embedder } from "../llm/types.js";
 import { log } from "../util/log.js";
 import { lineSlice, mapLimit, sha1, tokenize } from "../util/text.js";
 import type { CodeGraph } from "./indexer.js";
+import { CONTAINER_KINDS } from "./parser.js";
 
 export interface Chunk {
   id: string;
@@ -24,7 +25,6 @@ export interface SearchHit {
 
 const MAX_CHUNK_LINES = 120;
 const WINDOW = 60;
-const CONTAINERS = new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "protocol"]);
 
 /** Split the repo into searchable chunks: one per definition, or line windows for files without symbols. */
 export function buildChunks(graph: CodeGraph): Chunk[] {
@@ -42,7 +42,7 @@ export function buildChunks(graph: CodeGraph): Chunk[] {
     if (f.symbols.length) {
       for (const s of f.symbols) {
         const len = s.end - s.start + 1;
-        if (CONTAINERS.has(s.kind) && len > MAX_CHUNK_LINES) {
+        if (CONTAINER_KINDS.has(s.kind) && len > MAX_CHUNK_LINES) {
           add(s.start, s.start + 25, s.name, s.kind); // header of big classes
         } else {
           add(s.start, Math.min(s.end, s.start + MAX_CHUNK_LINES - 1), s.name, s.kind);

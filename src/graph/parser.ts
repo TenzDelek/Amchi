@@ -299,7 +299,8 @@ function signatureOf(node: TSNode): string {
   return first.length > 200 ? `${first.slice(0, 200)}…` : first;
 }
 
-const CONTAINER_KINDS = new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol", "mixin", "extension"]);
+/** Symbol kinds that enclose other symbols. Shared with chunking so big containers are treated alike. */
+export const CONTAINER_KINDS = new Set(["class", "interface", "struct", "impl", "trait", "module", "object", "namespace", "enum", "protocol", "mixin", "extension"]);
 
 /** Dart: a *_signature's body is the next sibling function_body (possibly of a wrapping node). */
 function dartBodyOf(sig: TSNode): TSNode | null {

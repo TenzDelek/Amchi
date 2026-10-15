@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import { context } from "@actions/github";
-import { loadConfig, severityRank, type Config, type Severity } from "./config.js";
+import { loadConfig, runDeadline, severityRank, type Config, type Severity } from "./config.js";
 import { answerQuestion } from "./chat/chat.js";
 import { Git } from "./git/git.js";
 import { parseUnifiedDiff } from "./git/diff.js";
@@ -257,7 +257,7 @@ async function reviewPr(
   }
 
   // The run gets a wall-clock budget (indexing included) so partial results are posted before the job's own timeout kills it.
-  const deadline = cfg.limits.max_run_seconds > 0 ? Date.now() + cfg.limits.max_run_seconds * 1000 : undefined;
+  const deadline = runDeadline(cfg);
   const llm = createLLM(cfg, keys, { deadline });
   const embedder = createEmbedder(cfg, keys, { deadline });
   const res = await runReview({

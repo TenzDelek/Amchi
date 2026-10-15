@@ -8,14 +8,17 @@ export function shortHash(s: string, n = 12): string {
   return sha1(s).slice(0, n);
 }
 
-/** Rough token estimate (~4 chars/token for code). Good enough for budgeting. */
+/** Rough chars-per-token ratio for code. The single source for every token estimate in the pipeline. */
+export const CHARS_PER_TOKEN = 4;
+
+/** Rough token estimate. Good enough for budgeting. */
 export function estimateTokens(s: string): number {
-  return Math.ceil(s.length / 4);
+  return Math.ceil(s.length / CHARS_PER_TOKEN);
 }
 
 /** Truncate a string to roughly `maxTokens`, keeping head and tail. */
 export function truncateTokens(s: string, maxTokens: number): string {
-  const maxChars = maxTokens * 4;
+  const maxChars = maxTokens * CHARS_PER_TOKEN;
   if (s.length <= maxChars) return s;
   const head = Math.floor(maxChars * 0.7);
   const tail = maxChars - head;

@@ -25,7 +25,44 @@ export const COMMON_NAMES = new Set([
 
 const DEF_RE = /\b(?:function|def|func|class|fn|interface|type|struct|enum|trait)\s+([A-Za-z_$][\w$]*)/;
 
-function rawSnippet(graph: CodeGraph, path: string, start: number, end: number, maxLines = 60): string | null {
+/**
+ * Kinds whose own body is not "the changed code": narrower than the parser's
+ * CONTAINER_KINDS on purpose, because struct/enum/trait bodies are short and
+ * worth showing in full.
+ */
+const CONTAINER_LIKE = new Set(["class", "module", "namespace", "impl"]);
+/** Kinds for which "callers" means nothing useful (interfaces have implementors, not callers). */
+const NO_CALLER_KINDS = new Set([...CONTAINER_LIKE, "interface"]);
+
+/** Retrieval limits. Hand-tuned; kept together so the context budget reads as policy. */
+export const RETRIEVAL = {
+  /** Lines shown by default for any snippet. */
+  defaultSnippetLines: 60,
+  /** Symbols longer than this are treated as containers when picking the innermost changed symbol. */
+  innermostMaxLines: 250,
+  /** Changed symbols up to this long are shown in full after the change. */
+  maxSymbolLines: 200,
+  /** Definitions of called functions: how many, and lines each. */
+  maxCallees: 10,
+  calleeSnippetLines: 40,
+  /** Callers of changed symbols: symbols covered, callers per symbol, lines of context around the call site. */
+  maxCallerSymbols: 5,
+  callersPerSymbol: 6,
+  callerContextLines: 3,
+  callerSnippetLines: 8,
+  /** References listed for a removed definition. */
+  maxRemovedRefs: 5,
+  /** Importers / imports listed in the dependencies section. */
+  maxListedPaths: 10,
+  /** Similar-code search: minimum added chars to bother, query size, candidates, shown, lines each. */
+  minAddedCharsForSearch: 40,
+  similarQueryChars: 2000,
+  similarCandidates: 6,
+  similarShown: 3,
+  similarSnippetLines: 30,
+} as const;
+
+function rawSnippet(graph: CodeGraph, path: string, start: number, end: number, maxLines: number = RETRIEVAL.defaultSnippetLines): string | null {
   const content = graph.read(path);
   if (content == null) return null;
   const e = Math.min(end, start + maxLines - 1);
@@ -62,7 +99,7 @@ export async function buildFileContext(
   // Track what has been shown so later sections don't repeat it.
   const seen: { path: string; start: number; end: number }[] = [];
   const overlapsSeen = (p: string, s: number, e: number) => seen.some((x) => x.path === p && x.start <= e && x.end >= s);
-  const snippet = (p: string, s: number, e: number, maxLines = 60) => {
+  const snippet = (p: string, s: number, e: number, maxLines: number = RETRIEVAL.defaultSnippetLines) => {
     const sn = rawSnippet(graph, p, s, e, maxLines);
     if (sn) seen.push({ path: p, start: s, end: e });
     return sn;
@@ -83,18 +120,18 @@ export async function buildFileContext(
     for (const [s, e] of ranges) {
       const syms = graph.symbolsOverlapping(path, s, e);
       // innermost symbol that is not a huge container
-      const inner = [...syms].reverse().find((x) => x.end - x.start < 250) ?? syms[syms.length - 1];
+      const inner = [...syms].reverse().find((x) => x.end - x.start < RETRIEVAL.innermostMaxLines) ?? syms[syms.length - 1];
       if (inner) changedSyms.set(`${inner.name}@${inner.start}`, inner);
       // also record every function-ish symbol touched (for caller analysis)
-      for (const x of syms) if (!["class", "module", "namespace", "impl"].includes(x.kind)) changedSyms.set(`${x.name}@${x.start}`, x);
+      for (const x of syms) if (!CONTAINER_LIKE.has(x.kind)) changedSyms.set(`${x.name}@${x.start}`, x);
     }
     const shown = new Set<string>();
     for (const sym of changedSyms.values()) {
-      if (sym.end - sym.start > 200) continue;
+      if (sym.end - sym.start > RETRIEVAL.maxSymbolLines) continue;
       const key = `${sym.start}-${sym.end}`;
       if (shown.has(key)) continue;
       shown.add(key);
-      const sn = snippet(path, sym.start, sym.end, 200);
+      const sn = snippet(path, sym.start, sym.end, RETRIEVAL.maxSymbolLines);
       if (sn) sections.push({ title: `Full ${sym.kind} \`${sym.name}\` after the change`, body: sn, priority: 100 });
     }
   }
@@ -106,7 +143,7 @@ export async function buildFileContext(
     for (const c of entry.topLevelCalls) if (addedTokens.has(c)) calls.add(c);
     let n = 0;
     for (const name of calls) {
-      if (n >= 10) break;
+      if (n >= RETRIEVAL.maxCallees) break;
       const all = graph.definitionsOf(name, path).filter(
         (d) => !(d.path === path && [...changedSyms.values()].some((s) => s.start === d.symbol.start)),
       );
@@ -116,7 +153,7 @@ export async function buildFileContext(
       if (!defs.length && all.length === 1 && !COMMON_NAMES.has(name)) defs.push(all[0]);
       const d = defs[0];
       if (!d) continue;
-      const sn = snippet(d.path, d.symbol.start, d.symbol.end, 40);
+      const sn = snippet(d.path, d.symbol.start, d.symbol.end, RETRIEVAL.calleeSnippetLines);
       if (sn) {
         sections.push({
           title: `Definition of \`${name}\` (called by the changed code)${defs.length > 1 ? ` — ${defs.length} definitions found, showing best match` : ""}`,
@@ -132,20 +169,25 @@ export async function buildFileContext(
   {
     let n = 0;
     for (const sym of changedSyms.values()) {
-      if (["class", "module", "namespace", "impl", "interface"].includes(sym.kind)) continue;
+      if (NO_CALLER_KINDS.has(sym.kind)) continue;
       if (COMMON_NAMES.has(sym.name)) continue;
       const unique = (graph.defsByName.get(sym.name)?.length ?? 0) <= 1;
       const relevant = graph
         .callersOf(sym.name)
         .filter((c) => !(c.path === path && c.symbol.start === sym.start))
         .filter((c) => unique || c.path === path || graph.dependsOn(c.path, path));
-      const callers = relevant.slice(0, 6);
+      const callers = relevant.slice(0, RETRIEVAL.callersPerSymbol);
       if (!callers.length) continue;
       const parts: string[] = [];
       for (const c of callers) {
         const line = callSiteLine(graph, c.path, c.symbol, sym.name);
         if (line == null) continue;
-        const sn = snippet(c.path, Math.max(c.symbol.start, line - 3), Math.min(c.symbol.end, line + 3), 8);
+        const sn = snippet(
+          c.path,
+          Math.max(c.symbol.start, line - RETRIEVAL.callerContextLines),
+          Math.min(c.symbol.end, line + RETRIEVAL.callerContextLines),
+          RETRIEVAL.callerSnippetLines,
+        );
         if (sn) parts.push(`in \`${c.symbol.name}\`${prPaths.has(c.path) ? " (also changed in this PR)" : ""}:\n${sn}`);
       }
       if (parts.length) {
@@ -157,7 +199,7 @@ export async function buildFileContext(
         });
         n++;
       }
-      if (n >= 5) break;
+      if (n >= RETRIEVAL.maxCallerSymbols) break;
     }
   }
 
@@ -169,7 +211,7 @@ export async function buildFileContext(
       if (m && !graph.defsByName.has(m[1])) removed.add(m[1]);
     }
     for (const name of removed) {
-      const refs = graph.callersOf(name).slice(0, 5);
+      const refs = graph.callersOf(name).slice(0, RETRIEVAL.maxRemovedRefs);
       if (!refs.length) continue;
       const list = refs
         .map((r) => {
@@ -192,11 +234,11 @@ export async function buildFileContext(
     const lines: string[] = [];
     if (importers.length) {
       lines.push(
-        `Imported by ${importers.length} file(s): ${importers.slice(0, 10).map((p) => `\`${p}\``).join(", ")}${importers.length > 10 ? ", …" : ""}`,
+        `Imported by ${importers.length} file(s): ${importers.slice(0, RETRIEVAL.maxListedPaths).map((p) => `\`${p}\``).join(", ")}${importers.length > RETRIEVAL.maxListedPaths ? ", …" : ""}`,
       );
     }
     if (entry?.resolved.length) {
-      lines.push(`Imports: ${entry.resolved.slice(0, 10).map((p) => `\`${p}\``).join(", ")}`);
+      lines.push(`Imports: ${entry.resolved.slice(0, RETRIEVAL.maxListedPaths).map((p) => `\`${p}\``).join(", ")}`);
     }
     if (tests.length) {
       const changed = tests.filter((t) => prPaths.has(t));
@@ -208,16 +250,16 @@ export async function buildFileContext(
   }
 
   // 6. Similar code elsewhere (duplicated logic, conventions to follow).
-  if (addedText.trim().length > 40) {
-    const query = [...changedSyms.values()].map((s) => s.name).join(" ") + "\n" + addedText.slice(0, 2000);
+  if (addedText.trim().length > RETRIEVAL.minAddedCharsForSearch) {
+    const query = [...changedSyms.values()].map((s) => s.name).join(" ") + "\n" + addedText.slice(0, RETRIEVAL.similarQueryChars);
     const hits = await searcher.search(
       query,
-      6,
+      RETRIEVAL.similarCandidates,
       (c) => c.path !== path && !!c.name && !overlapsSeen(c.path, c.start, c.end),
     );
     const parts: string[] = [];
-    for (const h of hits.slice(0, 3)) {
-      const sn = snippet(h.chunk.path, h.chunk.start, h.chunk.end, 30);
+    for (const h of hits.slice(0, RETRIEVAL.similarShown)) {
+      const sn = snippet(h.chunk.path, h.chunk.start, h.chunk.end, RETRIEVAL.similarSnippetLines);
       if (sn) parts.push(sn);
     }
     if (parts.length) {

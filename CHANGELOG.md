@@ -15,7 +15,8 @@ Notable changes to Amchi. Each entry names the behaviour a user or operator will
 - `verify_model`: run the `review.verify` pass on a cheaper model from the same provider.
 - Findings funnel and per-stage timings (`raw → verified → anchored → passing → capped → posted`) in the run log and the GitHub job summary. The PR comment is unchanged.
 - The summary notes when findings were posted without the verify pass because the deadline or token budget ended it early.
-- `docs/adr/`: architecture decision records, and a `CLAUDE.md` for agents working on the repo.
+- `docs/adr/`: architecture decision records, `docs/tech-debt.md` with the prioritised debt inventory, and a `CLAUDE.md` for agents working on the repo.
+- Unknown or misspelled keys in `.codereview.yml` are now reported as warnings instead of being silently ignored.
 
 ### Fixed
 
@@ -26,6 +27,8 @@ Notable changes to Amchi. Each entry names the behaviour a user or operator will
 - Numeric action inputs and `limits.*` values that are not valid non-negative numbers fall back to their defaults with a warning instead of silently disabling a guard.
 - The embeddings hint no longer suggests `embeddings: openai` when a custom `base_url` is set, since that would send the endpoint's key to api.openai.com.
 - `npm test` pins `--liftoff-only` for vitest workers, so the Swift grammar can no longer kill a test worker with a V8 out-of-memory crash.
+- `@actions/github` and `@actions/core` upgraded to their current majors, which removes the `undici`/`@fastify/busboy` advisories from the bundle; `npm audit --omit=dev` is clean.
+- The bundle no longer ships an unused Vue grammar. Elixir, supported since the grammar was added, is now listed in the README.
 
 ### Upgrading
 

@@ -23,7 +23,7 @@ It builds a **code graph** of the whole repository (functions, classes, imports,
 ```mermaid
 flowchart LR
   PR[PR opened / pushed] --> A[GitHub Action]
-  A --> I[Indexer<br/>tree-sitter, 15 languages]
+  A --> I[Indexer<br/>tree-sitter, 17 languages]
   C[(actions/cache<br/>.amchi)] <--> I
   I --> G[Code graph<br/>symbols · calls · imports]
   I --> E[Embeddings<br/>optional, cached]
@@ -41,7 +41,7 @@ flowchart LR
 3. **Review.** Files that depend on each other (imports, callers of changed functions) are sent in the same call so a signature change is reviewed next to its updated callers; small files share calls and large files go alone. The model returns structured JSON. Every finding is checked against the real diff lines GitHub will accept, deduplicated, filtered by severity and confidence, and capped.
 4. **Post.** Findings go out as one review with inline comments, and the summary comment is created or updated. Each comment carries a hidden fingerprint so re-runs never duplicate it.
 
-Supported languages (full graph): TypeScript, TSX, JavaScript, Python, Go, Rust, Java, Kotlin, Dart/Flutter, C, C++, C#, PHP, Swift, Scala, Lua. Other text files (Ruby, SQL, YAML, Markdown, Vue, etc.) are still reviewed and searchable without the call graph.
+Supported languages (full graph): TypeScript, TSX, JavaScript, Python, Go, Rust, Java, Kotlin, Dart/Flutter, C, C++, C#, PHP, Swift, Scala, Lua, Elixir. Other text files (Ruby, SQL, YAML, Markdown, Vue, etc.) are still reviewed and searchable without the call graph.
 
 For Dart, `package:<name>/…` imports resolve through the `name:` in `pubspec.yaml` (and `packages/<name>/lib/…` in monorepos), so callers across your Flutter app are part of the review context.
 
