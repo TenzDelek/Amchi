@@ -94,6 +94,10 @@ Every summary ends with the exact number of LLM calls and input/output tokens fo
 - Embeddings are paid once per code chunk and then cached, so after the first run only changed code is embedded.
 - To spend less, use a smaller model (`model: gpt-5.4-mini` or a Flash model), set `embeddings: off`, raise `min_severity`, add `ignore` globs for generated code, or lower `limits.max_total_input_tokens`.
 
+## Design decisions
+
+Architecture decision records live in [`docs/adr/`](docs/adr/README.md).
+
 ## Security
 
 - **Config comes from the base branch.** On PRs, `.codereview.yml` is read from the PR's base commit, so a PR can't change its own rules or instructions. `base_url` is accepted only as an action input, and it is only ever used with the OpenAI key, so no PR or config can redirect your API keys.
